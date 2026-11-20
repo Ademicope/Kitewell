@@ -35,6 +35,7 @@ import {
 } from "./network";
 import { validateAssetCode } from "./validateAssetCode";
 import { decodeTransactionEnvelope } from "./txInspector";
+import TransactionFailureNotice from "./TransactionFailureNotice";
 import "./App.css";
 
 const TABS = [
@@ -88,6 +89,7 @@ export default function App() {
   const [nextCursor, setNextCursor] = useState(null);
   const [loading, setLoading] = useState("");
   const [toast, setToast] = useState(null);
+  const [transactionFailure, setTransactionFailure] = useState(null);
   const [sendForm, setSendForm] = useState({
     destination: "",
     amount: "",
@@ -287,8 +289,10 @@ export default function App() {
     try {
       code = validateAssetCode(trustForm.code);
     } catch (err) {
+      setTransactionFailure(null);
       return showToast(err.message, "error");
     }
+    setTransactionFailure(null);
     setLoading("trust");
     try {
       await changeTrustWithFreighter(
@@ -303,6 +307,7 @@ export default function App() {
       showToast(`Trustline for ${code} submitted.`);
     } catch (err) {
       trackFailedSubmit("changeTrust", err);
+      setTransactionFailure(err.transactionFailure ?? null);
       showToast(err.message || "Change trust failed.", "error");
     } finally {
       setLoading("");
@@ -318,6 +323,7 @@ export default function App() {
       );
     }
 
+    setTransactionFailure(null);
     setLoading(`remove-${asset.key}`);
     try {
       await changeTrustWithFreighter(publicKey, asset.code, asset.issuer, "0");
@@ -326,6 +332,7 @@ export default function App() {
       showToast(`${asset.code} trustline removed.`);
     } catch (err) {
       trackFailedSubmit("changeTrust", err);
+      setTransactionFailure(err.transactionFailure ?? null);
       showToast(err.message || `Could not remove the ${asset.code} trustline.`, "error");
     } finally {
       setLoading("");
@@ -435,6 +442,7 @@ export default function App() {
       return;
     }
 
+    setTransactionFailure(null);
     setLoading("send");
     try {
       const result = await submitEnvelopeWithFreighter(
@@ -458,6 +466,7 @@ export default function App() {
       );
     } catch (err) {
       trackFailedSubmit("payment", err);
+      setTransactionFailure(err.transactionFailure ?? null);
       showToast(err.message || "Payment failed.", "error");
     } finally {
       setLoading("");
@@ -478,6 +487,7 @@ export default function App() {
     }
 
     setLoading("path");
+    setTransactionFailure(null);
     setPathResult(null);
     try {
       const result = await pathPaymentWithFreighter({
@@ -513,6 +523,7 @@ export default function App() {
       showToast(`Path payment submitted · ${result.hash.slice(0, 12)}…`);
     } catch (err) {
       trackFailedSubmit("pathPayment", err);
+      setTransactionFailure(err.transactionFailure ?? null);
       showToast(err.message || "Path payment failed.", "error");
     } finally {
       setLoading("");
@@ -604,6 +615,7 @@ export default function App() {
       return showToast("Enter a builder name to register.", "error");
     }
     setLoading("register");
+    setTransactionFailure(null);
     try {
       const result = await registerBuilderWithFreighter(
         publicKey,
@@ -793,6 +805,8 @@ export default function App() {
             </div>
           )}
         </section>
+
+        <TransactionFailureNotice failure={transactionFailure} />
 
         <nav className="tabs" aria-label="Lab sections" role="tablist">
           {TABS.map((t, index) => {

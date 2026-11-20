@@ -8,7 +8,10 @@ import {
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { findNetworkByPassphrase, getActiveNetwork } from "./network";
 import { buildAsset, parsePathAssets } from "./stellar";
-import { parseHorizonError } from "./horizonErrorParse";
+import {
+  getTransactionFailure,
+  parseHorizonError,
+} from "./horizonErrorParse";
 import {
   HORIZON_FAILURE_CODE,
   freighterCancelledError,
@@ -296,7 +299,9 @@ async function signAndSubmit(transaction, publicKey) {
     if (body && typeof body === "object") {
       try {
         const { reason } = parseHorizonError(body);
-        throw horizonFailureError(reason, error);
+        const failureError = horizonFailureError(reason, error);
+        failureError.transactionFailure = getTransactionFailure(error);
+        throw failureError;
       } catch (maybeWrapped) {
         if (maybeWrapped?.code === HORIZON_FAILURE_CODE) throw maybeWrapped;
       }
