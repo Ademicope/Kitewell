@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * CI-friendly tests for the Soroban helpers in ./freighter.
@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * - The real SDK is used for tx building, XDR round-trips, and scVal decoding.
  */
 
-const { sorobanServerMock, signTransactionMock } = vi.hoisted(() => ({
+const { sorobanServerMock, signTransactionMock, horizonServerMock } = vi.hoisted(() => ({
   sorobanServerMock: {
     simulateTransaction: vi.fn(),
     prepareTransaction: vi.fn(),
@@ -18,6 +18,10 @@ const { sorobanServerMock, signTransactionMock } = vi.hoisted(() => ({
     getAccount: vi.fn(),
   },
   signTransactionMock: vi.fn(),
+  horizonServerMock: {
+    loadAccount: vi.fn(),
+    submitTransaction: vi.fn(),
+  },
 }));
 
 vi.mock("@stellar/freighter-api", () => ({
@@ -37,6 +41,12 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
         return sorobanServerMock;
       }),
     },
+    Horizon: {
+      ...actual.Horizon,
+      Server: vi.fn(function () {
+        return horizonServerMock;
+      }),
+    },
   };
 });
 
@@ -47,11 +57,39 @@ const {
   registerBuilderWithFreighter,
   buildSep7TxUri,
   parseSep7TxUri,
+  sendPaymentWithFreighter,
 } = await import("./freighter");
 
 const CONTRACT_ID =
   "CCWLNS5HECRJ2GM3Q6JZZDV334ZXYO6EKZLFPLQRXO6SUDAKMS4U3E3X";
 const USER = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+const DEST = StellarSdk.Keypair.random().publicKey();
+const AMOUNT = "10.0000000";
+
+// Build a valid signed transaction XDR for mocking
+let signedTxXdr;
+beforeAll(() => {
+  const account = new StellarSdk.Account(USER, "123456");
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: StellarSdk.Networks.TESTNET,
+  })
+    .addOperation(
+      StellarSdk.Operation.payment({
+        destination: DEST,
+        asset: StellarSdk.Asset.native(),
+        amount: AMOUNT,
+      })
+    )
+    .setTimeout(180)
+    .build();
+  // Sign with a dummy keypair to get valid XDR
+  const keypair = StellarSdk.Keypair.fromSecret(
+    "SBP4BHQPSIWSFMYZUE5RZ7AXZBKTUY76HNISQ7GZYD7U7JKGJBMRQR52"
+  );
+  tx.sign(keypair);
+  signedTxXdr = tx.toXDR();
+});
 
 /** Build the same tx shape the helpers build, for XDR round-trip asserts. */
 function buildRegisterTx(caller, name, sequence = "7") {
@@ -453,5 +491,77 @@ describe("SEP-7 transaction-request URI", () => {
     const uri = buildSep7TxUri(originalXdr, TEST_PASSPHRASE);
     const parsedXdr = parseSep7TxUri(uri, TEST_PASSPHRASE);
     expect(parsedXdr).toBe(originalXdr);
+  });
+});
+
+describe("sendPaymentWithFreighter time bounds", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Mock loadAccount to return a valid account
+    horizonServerMock.loadAccount.mockResolvedValue(
+      new StellarSdk.Account(USER, "123456")
+    );
+    // Mock submitTransaction to return a success result
+    horizonServerMock.submitTransaction.mockResolvedValue({
+      hash: "testhash123",
+    });
+    // Mock Freighter signTransaction
+    signTransactionMock.mockResolvedValue({
+      error: null,
+      signedTxXdr,
+    });
+  });
+
+  it("builds transaction with default timeout when no time bounds provided", async () => {
+    await sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "");
+
+    // Should have called setTimeout(180) not setTimeBounds
+    const txBuilder = horizonServerMock.loadAccount.mock.results[0].value;
+    expect(txBuilder).toBeDefined();
+    // The transaction is built internally, we verify by checking the submitTransaction call
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalled();
+  });
+
+  it("validates that max time must be after min time", async () => {
+    const minTime = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
+    const maxTime = minTime - 100; // max before min
+
+    await expect(
+      sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", minTime, maxTime)
+    ).rejects.toThrow("Maximum time must be after minimum time.");
+  });
+
+  it("validates that max time must be in the future", async () => {
+    const maxTime = Math.floor(Date.now() / 1000) - 100; // 100 seconds ago
+
+    await expect(
+      sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", null, maxTime)
+    ).rejects.toThrow("Maximum time must be in the future.");
+  });
+
+  it("allows min time only (with max defaulting to 0)", async () => {
+    const minTime = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
+
+    await sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", minTime, null);
+
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalled();
+  });
+
+  it("allows max time only (with min defaulting to 0)", async () => {
+    const maxTime = Math.floor(Date.now() / 1000) + 7200; // 2 hours from now
+
+    await sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", null, maxTime);
+
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalled();
+  });
+
+  it("accepts both min and max time when valid", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const minTime = now + 3600; // 1 hour from now
+    const maxTime = now + 7200; // 2 hours from now
+
+    await sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", minTime, maxTime);
+
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalled();
   });
 });

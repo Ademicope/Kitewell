@@ -366,6 +366,8 @@ export function resolvePaymentAsset(asset) {
  * Build a payment op, sign it with Freighter, and submit it to Horizon.
  * `asset` accepts a UI descriptor (`{ isNative: true }` or
  * `{ isNative: false, code, issuer }`); omit it to send native XLM.
+ * Optional `minTime` and `maxTime` are Unix timestamps (seconds) for transaction time bounds.
+ * When both are provided, they replace the default timeout.
  */
 export async function sendPaymentWithFreighter(
   publicKey,
@@ -373,10 +375,26 @@ export async function sendPaymentWithFreighter(
   amount,
   asset = null,
   memoType = "text",
-  memo = ""
+  memo = "",
+  minTime = null,
+  maxTime = null
 ) {
   if (!StellarSdk.StrKey.isValidEd25519PublicKey(destination)) {
     throw new Error("Destination must be a valid Stellar public key (G…).");
+  }
+
+  // Validate time bounds if provided
+  if (minTime !== null || maxTime !== null) {
+    const min = minTime !== null ? Number(minTime) : 0;
+    const max = maxTime !== null ? Number(maxTime) : 0;
+    const now = Math.floor(Date.now() / 1000);
+
+    if (minTime !== null && maxTime !== null && max <= min) {
+      throw new Error("Maximum time must be after minimum time.");
+    }
+    if (maxTime !== null && max <= now) {
+      throw new Error("Maximum time must be in the future.");
+    }
   }
 
   const transactionMemo = createMemo(memoType, memo);
@@ -396,7 +414,15 @@ export async function sendPaymentWithFreighter(
     txBuilder.addMemo(transactionMemo);
   }
 
-  const transaction = txBuilder.setTimeout(180).build();
+  let transaction;
+  if (minTime !== null || maxTime !== null) {
+    const min = minTime !== null ? Number(minTime) : 0;
+    const max = maxTime !== null ? Number(maxTime) : 0;
+    transaction = txBuilder.setTimebounds(min, max).build();
+  } else {
+    transaction = txBuilder.setTimeout(180).build();
+  }
+
   return signAndSubmit(transaction, publicKey);
 }
 

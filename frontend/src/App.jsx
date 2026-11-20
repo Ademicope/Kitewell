@@ -82,6 +82,8 @@ export default function App() {
     assetKey: "native",
     memoType: "text",
     memo: "",
+    minTime: "",
+    maxTime: "",
   });
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [pathForm, setPathForm] = useState({
@@ -285,6 +287,24 @@ export default function App() {
       return showToast("Text memos must be 28 UTF-8 bytes or fewer.", "error");
     }
 
+    // Validate and convert time bounds from UTC to Unix seconds
+    let minTime = null;
+    let maxTime = null;
+    if (sendForm.minTime) {
+      const dt = new Date(sendForm.minTime);
+      if (isNaN(dt.getTime())) {
+        return showToast("Invalid minimum time.", "error");
+      }
+      minTime = Math.floor(dt.getTime() / 1000);
+    }
+    if (sendForm.maxTime) {
+      const dt = new Date(sendForm.maxTime);
+      if (isNaN(dt.getTime())) {
+        return showToast("Invalid maximum time.", "error");
+      }
+      maxTime = Math.floor(dt.getTime() / 1000);
+    }
+
     const selected = balances.find((b) => b.key === sendForm.assetKey);
     if (!selected) {
       return showToast("Choose an asset you hold a trustline for.", "error");
@@ -308,7 +328,9 @@ export default function App() {
         amount,
         asset,
         sendForm.memoType,
-        sendForm.memo
+        sendForm.memo,
+        minTime,
+        maxTime
       );
       const next = await getAccountBalances(publicKey);
       setBalances(next);
@@ -318,6 +340,8 @@ export default function App() {
         assetKey: "native",
         memoType: "text",
         memo: "",
+        minTime: "",
+        maxTime: "",
       });
       showToast(
         `Payment submitted · ${result.hash.slice(0, 12)}…`,
@@ -1079,6 +1103,26 @@ export default function App() {
                   placeholder={memoField.placeholder}
                   value={sendForm.memo}
                   onChange={(e) => setSendForm({ ...sendForm, memo: e.target.value })}
+                />
+                <label className="label" htmlFor="send-min-time">
+                  Min time (UTC, optional)
+                </label>
+                <input
+                  id="send-min-time"
+                  className="input"
+                  type="datetime-local"
+                  value={sendForm.minTime}
+                  onChange={(e) => setSendForm({ ...sendForm, minTime: e.target.value })}
+                />
+                <label className="label" htmlFor="send-max-time">
+                  Max time (UTC, optional)
+                </label>
+                <input
+                  id="send-max-time"
+                  className="input"
+                  type="datetime-local"
+                  value={sendForm.maxTime}
+                  onChange={(e) => setSendForm({ ...sendForm, maxTime: e.target.value })}
                 />
                 <button
                   className="btn btn--primary"
