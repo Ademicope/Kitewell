@@ -35,6 +35,7 @@ import {
 } from "./network";
 import { validateAssetCode } from "./validateAssetCode";
 import { decodeTransactionEnvelope } from "./txInspector";
+import LatestLedgerHeader from "./LatestLedgerHeader";
 import "./App.css";
 
 const TABS = [
@@ -716,6 +717,7 @@ export default function App() {
             ))}
           </select>
         </label>
+        <LatestLedgerHeader networkId={networkId} />
       </header>
 
       <main className="main">
