@@ -58,6 +58,7 @@ const {
   buildSep7TxUri,
   parseSep7TxUri,
   sendPaymentWithFreighter,
+  submitEnvelope,
 } = await import("./freighter");
 
 const CONTRACT_ID =
@@ -563,5 +564,109 @@ describe("sendPaymentWithFreighter time bounds", () => {
     await sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", minTime, maxTime);
 
     expect(horizonServerMock.submitTransaction).toHaveBeenCalled();
+  });
+});
+
+describe("submitEnvelope", () => {
+  const USER = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  const DEST = StellarSdk.Keypair.random().publicKey();
+  const AMOUNT = "10.0000000";
+
+  // Build a valid unsigned transaction XDR for mocking
+  let unsignedTxXdr;
+  let signedTxXdr;
+  beforeAll(() => {
+    const account = new StellarSdk.Account(USER, "123456");
+    // Unsigned transaction
+    const unsignedTx = new StellarSdk.TransactionBuilder(account, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: StellarSdk.Networks.TESTNET,
+    })
+      .addOperation(
+        StellarSdk.Operation.payment({
+          destination: DEST,
+          asset: StellarSdk.Asset.native(),
+          amount: AMOUNT,
+        })
+      )
+      .setTimeout(180)
+      .build();
+    unsignedTxXdr = unsignedTx.toXDR();
+
+    // Signed transaction
+    const keypair = StellarSdk.Keypair.fromSecret(
+      "SBP4BHQPSIWSFMYZUE5RZ7AXZBKTUY76HNISQ7GZYD7U7JKGJBMRQR52"
+    );
+    const signedTx = new StellarSdk.TransactionBuilder(account, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: StellarSdk.Networks.TESTNET,
+    })
+      .addOperation(
+        StellarSdk.Operation.payment({
+          destination: DEST,
+          asset: StellarSdk.Asset.native(),
+          amount: AMOUNT,
+        })
+      )
+      .setTimeout(180)
+      .build();
+    signedTx.sign(keypair);
+    signedTxXdr = signedTx.toXDR();
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Mock loadAccount to return a valid account
+    horizonServerMock.loadAccount.mockResolvedValue(
+      new StellarSdk.Account(USER, "123456")
+    );
+    // Mock submitTransaction to return a success result
+    horizonServerMock.submitTransaction.mockResolvedValue({
+      hash: "testhash123",
+    });
+    // Mock Freighter signTransaction
+    signTransactionMock.mockResolvedValue({
+      error: null,
+      signedTxXdr,
+    });
+  });
+
+  it("submits unsigned envelope by signing with Freighter first", async () => {
+    const result = await submitEnvelope(unsignedTxXdr, USER);
+
+    expect(signTransactionMock).toHaveBeenCalledTimes(1);
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalledTimes(1);
+    expect(result.hash).toBe("testhash123");
+  });
+
+  it("submits signed envelope directly without re-signing", async () => {
+    const result = await submitEnvelope(signedTxXdr, USER);
+
+    expect(signTransactionMock).not.toHaveBeenCalled();
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalledTimes(1);
+    expect(result.hash).toBe("testhash123");
+  });
+
+  it("throws on decode error", async () => {
+    await expect(submitEnvelope("invalid_xdr", USER)).rejects.toThrow("Unable to decode transaction envelope");
+    expect(signTransactionMock).not.toHaveBeenCalled();
+    expect(horizonServerMock.submitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("submitted XDR equals pasted XDR for signed envelope", async () => {
+    // The submitted transaction should be the exact same XDR
+    let submittedXdr = null;
+    horizonServerMock.submitTransaction.mockImplementation(async (tx) => {
+      submittedXdr = tx.toXDR();
+      return { hash: "testhash123" };
+    });
+
+    await submitEnvelope(signedTxXdr, USER);
+
+    expect(submittedXdr).toBe(signedTxXdr);
+  });
+
+  it("throws on invalid XDR", async () => {
+    await expect(submitEnvelope("invalid_xdr", USER)).rejects.toThrow("Unable to decode transaction envelope");
   });
 });

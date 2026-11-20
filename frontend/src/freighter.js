@@ -287,6 +287,35 @@ export function parseSep7TxUri(uri, expectedPassphrase) {
   return envelopeXdr;
 }
 
+/**
+ * Submit a transaction envelope (signed or unsigned) through Freighter.
+ * If the envelope is unsigned, it will be signed by Freighter before submission.
+ * If already signed, it will be submitted as-is without adding a second signature.
+ * Returns the submission result from Horizon.
+ */
+export async function submitEnvelope(envelopeXdr, publicKey) {
+  const passphrase = currentPassphrase();
+  
+  // Parse the envelope to check if it's already signed
+  let transaction;
+  try {
+    transaction = StellarSdk.TransactionBuilder.fromXDR(envelopeXdr, passphrase);
+  } catch (err) {
+    throw new Error("Unable to decode transaction envelope: " + err.message);
+  }
+
+  const isSigned = transaction.signatures && transaction.signatures.length > 0;
+  
+  if (!isSigned) {
+    // Unsigned envelope: sign with Freighter then submit
+    const signedTx = await signWithFreighter(envelopeXdr, publicKey);
+    return getServer().submitTransaction(signedTx);
+  } else {
+    // Already signed: submit directly without re-signing
+    return getServer().submitTransaction(transaction);
+  }
+}
+
 export function getServerForComposer() {
   return new StellarSdk.Horizon.Server(getActiveNetwork().horizonUrl);
 }

@@ -14,6 +14,7 @@ import {
   getCurrentPassphrase,
   createMemoForComposer,
   resolvePaymentAsset,
+  submitEnvelope,
 } from "./freighter";
 import { shortenAddress } from "./addressFormat";
 import {
@@ -111,6 +112,9 @@ export default function App() {
   const [decoderInput, setDecoderInput] = useState("");
   const [decoderEnvelope, setDecoderEnvelope] = useState(null);
   const [decoderError, setDecoderError] = useState(null);
+  const [decoderDetails, setDecoderDetails] = useState(null);
+  const [decoderConfirmed, setDecoderConfirmed] = useState(false);
+  const [decoderSubmitting, setDecoderSubmitting] = useState(false);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
   const [labState, setLabState] = useState(null);
@@ -485,15 +489,61 @@ export default function App() {
   const handleDecoderPaste = () => {
     setDecoderError(null);
     setDecoderEnvelope(null);
+    setDecoderDetails(null);
+    setDecoderConfirmed(false);
     if (!decoderInput.trim()) return;
     try {
       const envelopeXdr = parseSep7TxUri(decoderInput.trim(), getCurrentPassphrase());
+      
+      // Decode the envelope to get details
+      const transaction = StellarSdk.TransactionBuilder.fromXDR(envelopeXdr, getCurrentPassphrase());
+      const source = transaction.sourceAccount || "Unknown";
+      const fee = transaction.fee || "0";
+      const operationCount = transaction.operations?.length || 0;
+      const isSigned = transaction.signatures && transaction.signatures.length > 0;
+      
+      setDecoderDetails({ source, fee, operationCount, isSigned });
       setDecoderEnvelope(envelopeXdr);
       showToast("Envelope loaded into decoder.");
     } catch (err) {
       setDecoderError(err.message);
       showToast(err.message, "error");
     }
+  };
+
+  const handleDecoderSubmit = async () => {
+    if (!decoderEnvelope || !decoderConfirmed) return;
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    
+    setDecoderSubmitting(true);
+    try {
+      const result = await submitEnvelope(decoderEnvelope, publicKey);
+      setDecoderEnvelope(null);
+      setDecoderDetails(null);
+      setDecoderConfirmed(false);
+      setDecoderInput("");
+      showToast(
+        `Transaction submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      // Refresh balances after submission
+      const next = await getAccountBalances(publicKey);
+      setBalances(next);
+    } catch (err) {
+      showToast(err.message || "Submit failed.", "error");
+    } finally {
+      setDecoderSubmitting(false);
+    }
+  };
+
+  const handleDecoderCancel = () => {
+    setDecoderEnvelope(null);
+    setDecoderDetails(null);
+    setDecoderConfirmed(false);
+    setDecoderInput("");
+    setDecoderError(null);
+    showToast("Decoder cleared.");
   };
 
   const handleHistory = async () => {
@@ -1493,9 +1543,68 @@ export default function App() {
               {decoderEnvelope && (
                 <div className="info-box" style={{ marginTop: 8 }}>
                   <span className="eyebrow">Loaded envelope (XDR)</span>
-                  <code style={{ display: "block", wordBreak: "break-all" }}>
+                  <code style={{ display: "block", wordBreak: "break-all", marginBottom: 8 }}>
                     {decoderEnvelope}
                   </code>
+                  {decoderDetails && (
+                    <div style={{ marginTop: 12, padding: 12, background: "var(--color-bg-secondary)", borderRadius: 6 }}>
+                      <div className="metadata-grid" style={{ marginBottom: 12 }}>
+                        <div>
+                          <span className="metadata-label">Source account</span>
+                          <span className="metadata-value">{shortenAddress(decoderDetails.source)}</span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Fee</span>
+                          <span className="metadata-value">{parseInt(decoderDetails.fee).toLocaleString()} stroops</span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Operations</span>
+                          <span className="metadata-value">{decoderDetails.operationCount}</span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Status</span>
+                          <span className="metadata-value">{decoderDetails.isSigned ? "Signed" : "Unsigned (will be signed by Freighter)"}</span>
+                        </div>
+                      </div>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={decoderConfirmed}
+                          onChange={(e) => setDecoderConfirmed(e.target.checked)}
+                          disabled={decoderSubmitting}
+                        />
+                        <span>
+                          I confirm submitting this transaction from <strong>{shortenAddress(decoderDetails.source)}</strong>
+                          with fee <strong>{parseInt(decoderDetails.fee).toLocaleString()} stroops</strong>
+                          and <strong>{decoderDetails.operationCount}</strong> operation(s).
+                        </span>
+                      </label>
+                      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                        <button
+                          className="btn btn--primary"
+                          type="button"
+                          onClick={handleDecoderSubmit}
+                          disabled={!decoderConfirmed || decoderSubmitting || !publicKey || loading === "composer"}
+                        >
+                          {decoderSubmitting ? (
+                            <>
+                              <Spinner size={14} /> Submitting…
+                            </>
+                          ) : (
+                            "Submit transaction"
+                          )}
+                        </button>
+                        <button
+                          className="btn btn--secondary"
+                          type="button"
+                          onClick={handleDecoderCancel}
+                          disabled={decoderSubmitting}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
