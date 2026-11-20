@@ -132,6 +132,9 @@ export default function App() {
   const pathModeField = PATH_MODE_FIELDS[pathForm.mode];
   const updatePathForm = (changes) => setPathForm((prev) => ({ ...prev, ...changes }));
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
+  const selectedSendAssetAvailable = selectedSendAsset
+    ? parseFloat(selectedSendAsset.balance) - parseFloat(selectedSendAsset.sellingLiabilities || "0")
+    : null;
 
   useEffect(() => {
     checkFreighterInstalled().then(setFreighterInstalled);
@@ -309,9 +312,11 @@ export default function App() {
     if (!selected) {
       return showToast("Choose an asset you hold a trustline for.", "error");
     }
-    if (parseFloat(amount) > parseFloat(selected.balance)) {
+    const sellingLiabilities = parseFloat(selected.sellingLiabilities || "0");
+    const availableBalance = parseFloat(selected.balance) - sellingLiabilities;
+    if (parseFloat(amount) > availableBalance) {
       return showToast(
-        `Insufficient ${selected.code} balance. Available: ${selected.balance}.`,
+        `Insufficient ${selected.code} balance. Available: ${availableBalance.toFixed(7)} (balance: ${selected.balance}, selling liabilities: ${sellingLiabilities.toFixed(7)}).`,
         "error"
       );
     }
@@ -926,6 +931,14 @@ export default function App() {
                             {shortenAddress(b.issuer)}
                           </span>
                         )}
+                        <div className="balance-row__liabilities">
+                          <span className="liability selling" title="Selling liabilities (offers selling this asset)">
+                            ▼ {parseFloat(b.sellingLiabilities || "0").toLocaleString(undefined, { maximumFractionDigits: 7 })}
+                          </span>
+                          <span className="liability buying" title="Buying liabilities (offers buying this asset)">
+                            ▲ {parseFloat(b.buyingLiabilities || "0").toLocaleString(undefined, { maximumFractionDigits: 7 })}
+                          </span>
+                        </div>
                       </div>
                       <div className="balance-row__actions">
                         <span>
@@ -1048,17 +1061,20 @@ export default function App() {
                   <option value="native">XLM (native)</option>
                   {balances
                     .filter((b) => !b.isNative)
-                    .map((b) => (
-                      <option key={b.key} value={b.key}>
-                        {b.code} ·{" "}
-                        {parseFloat(b.balance).toLocaleString(undefined, {
-                          maximumFractionDigits: 4,
-                        })}
-                      </option>
-                    ))}
+                    .map((b) => {
+                      const available = parseFloat(b.balance) - parseFloat(b.sellingLiabilities || "0");
+                      return (
+                        <option key={b.key} value={b.key}>
+                          {b.code} ·{" "}
+                          {available.toLocaleString(undefined, {
+                            maximumFractionDigits: 4,
+                          })}
+                        </option>
+                      );
+                    })}
                 </select>
                 <label className="label" htmlFor="send-amount">
-                  Amount ({selectedSendAsset?.code ?? "XLM"})
+                  Amount ({selectedSendAsset?.code ?? "XLM"}){selectedSendAssetAvailable !== null ? ` · Available: ${selectedSendAssetAvailable.toFixed(7)}` : ""}
                 </label>
                 <input
                   id="send-amount"
