@@ -45,6 +45,8 @@ const {
   SOROBAN_RPC_URL,
   readKitewellState,
   registerBuilderWithFreighter,
+  buildSep7TxUri,
+  parseSep7TxUri,
 } = await import("./freighter");
 
 const CONTRACT_ID =
@@ -398,5 +400,58 @@ describe("registerBuilderWithFreighter", () => {
     await expect(
       registerBuilderWithFreighter(USER, "GAAAAWTF", "alice")
     ).rejects.toThrow("valid Soroban contract");
+  });
+});
+
+describe("SEP-7 transaction-request URI", () => {
+  const TEST_PASSPHRASE = StellarSdk.Networks.TESTNET;
+  const TEST_ENVELOPE_XDR = "AAAAAAAAAABAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAA=";
+
+  it("builds a valid SEP-7 URI with envelope XDR and network passphrase", () => {
+    const uri = buildSep7TxUri(TEST_ENVELOPE_XDR, TEST_PASSPHRASE);
+    // URLSearchParams uses + for spaces in application/x-www-form-urlencoded
+    expect(uri).toBe(
+      `web+stellar:tx:${TEST_ENVELOPE_XDR}?network_passphrase=Test+SDF+Network+%3B+September+2015`
+    );
+  });
+
+  it("throws when envelope XDR is empty", () => {
+    expect(() => buildSep7TxUri("", TEST_PASSPHRASE)).toThrow("Envelope XDR is required");
+    expect(() => buildSep7TxUri(null, TEST_PASSPHRASE)).toThrow("Envelope XDR is required");
+  });
+
+  it("parses a valid SEP-7 URI and returns the envelope XDR", () => {
+    const uri = buildSep7TxUri(TEST_ENVELOPE_XDR, TEST_PASSPHRASE);
+    const envelopeXdr = parseSep7TxUri(uri, TEST_PASSPHRASE);
+    expect(envelopeXdr).toBe(TEST_ENVELOPE_XDR);
+  });
+
+  it("throws when URI has wrong scheme", () => {
+    expect(() => parseSep7TxUri("stellar:tx:abc?network_passphrase=test", TEST_PASSPHRASE)).toThrow(
+      "Invalid SEP-7"
+    );
+    expect(() => parseSep7TxUri("https://example.com", TEST_PASSPHRASE)).toThrow("Invalid SEP-7");
+  });
+
+  it("throws when URI is missing transaction envelope", () => {
+    const uri = `web+stellar:tx:?network_passphrase=${encodeURIComponent(TEST_PASSPHRASE)}`;
+    expect(() => parseSep7TxUri(uri, TEST_PASSPHRASE)).toThrow("missing transaction envelope");
+  });
+
+  it("throws when URI is missing network_passphrase parameter", () => {
+    const uri = `web+stellar:tx:${TEST_ENVELOPE_XDR}`;
+    expect(() => parseSep7TxUri(uri, TEST_PASSPHRASE)).toThrow("missing network_passphrase");
+  });
+
+  it("throws when network passphrase does not match expected", () => {
+    const uri = buildSep7TxUri(TEST_ENVELOPE_XDR, "Different Network Passphrase");
+    expect(() => parseSep7TxUri(uri, TEST_PASSPHRASE)).toThrow("different network");
+  });
+
+  it("round-trips an envelope through the URI", () => {
+    const originalXdr = TEST_ENVELOPE_XDR;
+    const uri = buildSep7TxUri(originalXdr, TEST_PASSPHRASE);
+    const parsedXdr = parseSep7TxUri(uri, TEST_PASSPHRASE);
+    expect(parsedXdr).toBe(originalXdr);
   });
 });

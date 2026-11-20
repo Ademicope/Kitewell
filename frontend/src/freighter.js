@@ -246,6 +246,86 @@ async function signAndSubmit(transaction, publicKey) {
 }
 
 /**
+ * Build a SEP-7 transaction-request URI (web+stellar:tx) from an unsigned
+ * transaction envelope XDR and the network passphrase.
+ */
+export function buildSep7TxUri(envelopeXdr, passphrase) {
+  if (!envelopeXdr) {
+    throw new Error("Envelope XDR is required to build a SEP-7 URI.");
+  }
+  const params = new URLSearchParams({ network_passphrase: passphrase });
+  return `web+stellar:tx:${envelopeXdr}?${params.toString()}`;
+}
+
+/**
+ * Parse a SEP-7 transaction-request URI and validate its network passphrase
+ * matches the expected passphrase. Returns the envelope XDR on success.
+ */
+export function parseSep7TxUri(uri, expectedPassphrase) {
+  if (!uri || !uri.startsWith("web+stellar:tx:")) {
+    throw new Error("Invalid SEP-7 transaction-request URI.");
+  }
+  // Remove the scheme prefix to get the rest: <envelope>?network_passphrase=...
+  const rest = uri.slice("web+stellar:tx:".length);
+  const questionIdx = rest.indexOf("?");
+  if (questionIdx === -1) {
+    throw new Error("SEP-7 URI missing network_passphrase parameter.");
+  }
+  const envelopeXdr = rest.slice(0, questionIdx);
+  if (!envelopeXdr) {
+    throw new Error("SEP-7 URI missing transaction envelope.");
+  }
+  const queryString = rest.slice(questionIdx + 1);
+  const params = new URLSearchParams(queryString);
+  const passphrase = params.get("network_passphrase");
+  if (!passphrase) {
+    throw new Error("SEP-7 URI missing network_passphrase parameter.");
+  }
+  if (passphrase !== expectedPassphrase) {
+    throw new Error("Transaction request is for a different network.");
+  }
+  return envelopeXdr;
+}
+
+export function getServerForComposer() {
+  return new StellarSdk.Horizon.Server(getActiveNetwork().horizonUrl);
+}
+
+export function getCurrentPassphrase() {
+  return getActiveNetwork().passphrase;
+}
+
+export function createMemoForComposer(memoType, value) {
+  const MAX_MEMO_TEXT_BYTES = 28;
+  const MAX_U64 = 18446744073709551615n;
+
+  if (!value) return null;
+
+  if (memoType === "text") {
+    if (new TextEncoder().encode(value).length > MAX_MEMO_TEXT_BYTES) {
+      throw new Error("Text memos must be 28 UTF-8 bytes or fewer.");
+    }
+    return StellarSdk.Memo.text(value);
+  }
+
+  if (memoType === "id") {
+    if (!/^\d{1,20}$/.test(value) || BigInt(value) > MAX_U64) {
+      throw new Error("ID memos must be unsigned 64-bit integers.");
+    }
+    return StellarSdk.Memo.id(value);
+  }
+
+  if (memoType === "hash") {
+    if (!/^[0-9a-fA-F]{64}$/.test(value)) {
+      throw new Error("Hash memos must be exactly 64 hexadecimal characters.");
+    }
+    return StellarSdk.Memo.hash(value);
+  }
+
+  throw new Error(`Unsupported memo type: ${memoType}`);
+}
+
+/**
  * Validate a Stellar amount string (positive, max 7 decimal places) without
  * going through floating point, so values like 0.0000001 stay intact.
  */

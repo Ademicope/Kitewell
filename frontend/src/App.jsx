@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import * as StellarSdk from "@stellar/stellar-sdk";
 import {
   checkFreighterInstalled,
   connectFreighterWallet,
@@ -7,6 +8,12 @@ import {
   changeTrustWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
+  buildSep7TxUri,
+  parseSep7TxUri,
+  getServerForComposer,
+  getCurrentPassphrase,
+  createMemoForComposer,
+  resolvePaymentAsset,
 } from "./freighter";
 import { shortenAddress } from "./addressFormat";
 import {
@@ -28,7 +35,7 @@ import {
 import { validateAssetCode } from "./validateAssetCode";
 import "./App.css";
 
-const TABS = ["Wallet", "Fund", "Assets", "Send", "Path", "History", "Lab"];
+const TABS = ["Wallet", "Fund", "Assets", "Send", "Path", "History", "Composer", "Lab"];
 const PATH_MODE_FIELDS = {
   strictSend: {
     amountLabel: "Amount to send",
@@ -91,6 +98,17 @@ export default function App() {
     path: "",
   });
   const [pathResult, setPathResult] = useState(null);
+  const [composerForm, setComposerForm] = useState({
+    destination: "",
+    amount: "",
+    assetKey: "native",
+    memoType: "text",
+    memo: "",
+  });
+  const [composerEnvelope, setComposerEnvelope] = useState(null);
+  const [decoderInput, setDecoderInput] = useState("");
+  const [decoderEnvelope, setDecoderEnvelope] = useState(null);
+  const [decoderError, setDecoderError] = useState(null);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
   const [labState, setLabState] = useState(null);
@@ -364,6 +382,88 @@ export default function App() {
       showToast(err.message || "Path payment failed.", "error");
     } finally {
       setLoading("");
+    }
+  };
+
+  const buildComposerEnvelope = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!composerForm.destination) {
+      return showToast("Destination is required.", "error");
+    }
+    let amount;
+    try {
+      amount = validatePaymentAmount(composerForm.amount);
+    } catch (err) {
+      return showToast(err.message, "error");
+    }
+    if (
+      composerForm.memoType === "text" &&
+      new TextEncoder().encode(composerForm.memo).length > 28
+    ) {
+      return showToast("Text memos must be 28 UTF-8 bytes or fewer.", "error");
+    }
+
+    const selected = balances.find((b) => b.key === composerForm.assetKey);
+    if (!selected) {
+      return showToast("Choose an asset you hold a trustline for.", "error");
+    }
+
+    const asset = selected.isNative
+      ? { isNative: true }
+      : { isNative: false, code: selected.code, issuer: selected.issuer };
+
+    setLoading("composer");
+    try {
+      const transactionMemo = createMemoForComposer(composerForm.memoType, composerForm.memo);
+      const sourceAccount = await getServerForComposer().loadAccount(publicKey);
+      const txBuilder = new StellarSdk.TransactionBuilder(sourceAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: getCurrentPassphrase(),
+      }).addOperation(
+        StellarSdk.Operation.payment({
+          destination: composerForm.destination,
+          asset: resolvePaymentAsset(asset),
+          amount: amount.toString(),
+        })
+      );
+
+      if (transactionMemo) {
+        txBuilder.addMemo(transactionMemo);
+      }
+
+      const transaction = txBuilder.setTimeout(180).build();
+      const envelopeXdr = transaction.toXDR();
+      setComposerEnvelope(envelopeXdr);
+      showToast("Envelope built. Copy the SEP-7 URI below.");
+    } catch (err) {
+      showToast(err.message || "Failed to build envelope.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const copyComposerUri = async () => {
+    if (!composerEnvelope) return showToast("No envelope to copy.", "error");
+    try {
+      const uri = buildSep7TxUri(composerEnvelope, getCurrentPassphrase());
+      await navigator.clipboard.writeText(uri);
+      showToast("SEP-7 URI copied to clipboard.");
+    } catch (err) {
+      showToast(err.message || "Failed to copy URI.", "error");
+    }
+  };
+
+  const handleDecoderPaste = () => {
+    setDecoderError(null);
+    setDecoderEnvelope(null);
+    if (!decoderInput.trim()) return;
+    try {
+      const envelopeXdr = parseSep7TxUri(decoderInput.trim(), getCurrentPassphrase());
+      setDecoderEnvelope(envelopeXdr);
+      showToast("Envelope loaded into decoder.");
+    } catch (err) {
+      setDecoderError(err.message);
+      showToast(err.message, "error");
     }
   };
 
@@ -1175,6 +1275,167 @@ export default function App() {
                   >
                     View on StellarExpert ↗
                   </a>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "Composer" && (
+            <div className="section">
+              <h2>Transaction Composer</h2>
+              <p className="muted">
+                Build an unsigned transaction envelope and export it as a SEP-7
+                <code>web+stellar:tx</code> URI for handoff to another signer.
+              </p>
+              <form onSubmit={(e) => { e.preventDefault(); buildComposerEnvelope(); }} className="form">
+                <label className="label" htmlFor="composer-destination">
+                  Destination
+                </label>
+                <input
+                  id="composer-destination"
+                  className="input"
+                  type="text"
+                  placeholder="G…"
+                  value={composerForm.destination}
+                  onChange={(e) => setComposerForm({ ...composerForm, destination: e.target.value })}
+                  required
+                />
+                <label className="label" htmlFor="composer-asset">
+                  Asset
+                </label>
+                <select
+                  id="composer-asset"
+                  className="input"
+                  value={composerForm.assetKey}
+                  onChange={(e) => setComposerForm({ ...composerForm, assetKey: e.target.value })}
+                >
+                  <option value="native">XLM (native)</option>
+                  {balances
+                    .filter((b) => !b.isNative)
+                    .map((b) => (
+                      <option key={b.key} value={b.key}>
+                        {b.code} ·{" "}
+                        {parseFloat(b.balance).toLocaleString(undefined, {
+                          maximumFractionDigits: 4,
+                        })}
+                      </option>
+                    ))}
+                </select>
+                <label className="label" htmlFor="composer-amount">
+                  Amount ({selectedSendAsset?.code ?? "XLM"})
+                </label>
+                <input
+                  id="composer-amount"
+                  className="input"
+                  type="number"
+                  step="0.0000001"
+                  min="0.0000001"
+                  placeholder="e.g. 10"
+                  value={composerForm.amount}
+                  onChange={(e) => setComposerForm({ ...composerForm, amount: e.target.value })}
+                  required
+                />
+                <label className="label" htmlFor="composer-memo-type">
+                  Memo type
+                </label>
+                <select
+                  id="composer-memo-type"
+                  className="input"
+                  value={composerForm.memoType}
+                  onChange={(e) =>
+                    setComposerForm({
+                      ...composerForm,
+                      memoType: e.target.value,
+                      memo: "",
+                    })
+                  }
+                >
+                  <option value="text">Text</option>
+                  <option value="id">ID</option>
+                  <option value="hash">Hash</option>
+                </select>
+                <label className="label" htmlFor="composer-memo">
+                  Memo (optional)
+                </label>
+                <input
+                  id="composer-memo"
+                  className="input"
+                  type="text"
+                  maxLength={memoField.maxLength}
+                  pattern={memoField.pattern}
+                  inputMode={memoField.inputMode}
+                  placeholder={memoField.placeholder}
+                  value={composerForm.memo}
+                  onChange={(e) => setComposerForm({ ...composerForm, memo: e.target.value })}
+                />
+                <button
+                  className="btn btn--primary"
+                  type="submit"
+                  disabled={loading === "composer" || requireWallet}
+                >
+                  {loading === "composer" ? (
+                    <>
+                      <Spinner /> Building…
+                    </>
+                  ) : (
+                    "Build envelope"
+                  )}
+                </button>
+              </form>
+
+              {composerEnvelope && (
+                <div className="info-box" style={{ marginTop: 16 }}>
+                  <span className="eyebrow">Unsigned envelope (XDR)</span>
+                  <code style={{ display: "block", wordBreak: "break-all", marginBottom: 8 }}>
+                    {composerEnvelope}
+                  </code>
+                  <button
+                    className="btn btn--secondary"
+                    type="button"
+                    onClick={copyComposerUri}
+                    disabled={loading === "composer"}
+                  >
+                    Copy SEP-7 URI
+                  </button>
+                </div>
+              )}
+
+              <hr style={{ margin: "24px 0" }} />
+
+              <h3>Decoder / Replace</h3>
+              <p className="muted">
+                Paste a <code>web+stellar:tx</code> URI to load its envelope.
+              </p>
+              <div className="form" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <input
+                  className="input"
+                  style={{ flex: 1, minWidth: 280 }}
+                  type="text"
+                  placeholder="web+stellar:tx:AAAA...?network_passphrase=..."
+                  value={decoderInput}
+                  onChange={(e) => setDecoderInput(e.target.value)}
+                />
+                <button
+                  className="btn btn--primary"
+                  type="button"
+                  onClick={handleDecoderPaste}
+                  disabled={loading === "composer"}
+                >
+                  Load envelope
+                </button>
+              </div>
+              {decoderError && (
+                <div className="info-box info-box--warning" style={{ marginTop: 8 }}>
+                  <span className="eyebrow">Decoder error</span>
+                  <p className="muted">{decoderError}</p>
+                </div>
+              )}
+              {decoderEnvelope && (
+                <div className="info-box" style={{ marginTop: 8 }}>
+                  <span className="eyebrow">Loaded envelope (XDR)</span>
+                  <code style={{ display: "block", wordBreak: "break-all" }}>
+                    {decoderEnvelope}
+                  </code>
                 </div>
               )}
             </div>
