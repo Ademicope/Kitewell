@@ -149,6 +149,7 @@ export async function getAccountDetails(publicKey) {
     sequence: account.sequenceNumber(),
     subentryCount: account.subentry_count,
     thresholds: account.thresholds,
+    signers: account.signers,
     balances: mapHorizonBalances(account),
     explorerUrl: explorerAccountUrl(publicKey),
   };
