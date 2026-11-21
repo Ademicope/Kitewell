@@ -7,6 +7,7 @@ import {
   changeTrustWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
+  renameBuilderWithFreighter,
 } from "./freighter";
 import { shortenAddress } from "./addressFormat";
 import {
@@ -97,6 +98,7 @@ export default function App() {
   const [labStateError, setLabStateError] = useState(null);
   const [registerForm, setRegisterForm] = useState({ name: "" });
   const [lastRegisterTx, setLastRegisterTx] = useState(null);
+  const [renameForm, setRenameForm] = useState({ name: "" });
   const tabRefs = useRef([]);
   const [accountDetails, setAccountDetails] = useState(null);
 
@@ -470,6 +472,43 @@ export default function App() {
       setLabState(state);
     } catch (err) {
       showToast(err.message || "Contract invoke failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleRename = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    const contractId = labInfo?.network?.contract?.kitewell;
+    if (!contractId) {
+      return showToast(
+        "No contract id configured — deploy first (contracts/README.md).",
+        "error"
+      );
+    }
+    if (!renameForm.name.trim()) {
+      return showToast("Enter a new builder name.", "error");
+    }
+    setLoading("rename");
+    try {
+      const result = await renameBuilderWithFreighter(
+        publicKey,
+        contractId,
+        renameForm.name
+      );
+      setRenameForm({ name: "" });
+      showToast(
+        result.confirmed
+          ? `Renamed on-chain · ${result.hash.slice(0, 12)}…`
+          : `Submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      const state = await readKitewellState(contractId, publicKey);
+      setLabState(state);
+    } catch (err) {
+      showToast(err.message || "Rename failed.", "error");
     } finally {
       setLoading("");
     }
@@ -1280,35 +1319,71 @@ export default function App() {
                       <p className="muted">{labStateError}</p>
                     </div>
                   )}
-                  <form className="form" onSubmit={handleRegister}>
-                    <label className="label" htmlFor="builder-name">
-                      Builder name
-                    </label>
-                    <input
-                      id="builder-name"
-                      className="input"
-                      maxLength={64}
-                      placeholder="e.g. stellar-alice"
-                      value={registerForm.name}
-                      onChange={(e) =>
-                        setRegisterForm({ ...registerForm, name: e.target.value })
-                      }
-                    />
-                    <button
-                      className="btn btn--primary"
-                      type="submit"
-                      disabled={loading === "register" || requireWallet}
-                    >
-                      {loading === "register" ? (
-                        <>
-                          <Spinner /> Signing in Freighter…
-                        </>
-                      ) : (
-                        "Sign & register"
-                      )}
-                    </button>
-                    {!publicKey && <p className="muted">Connect Freighter to sign.</p>}
-                  </form>
+                  {labState?.builder ? (
+                    <form className="form" onSubmit={handleRename}>
+                      <h3 className="subhead">Rename</h3>
+                      <p className="muted" style={{ marginBottom: 12 }}>
+                        Change your registered name without affecting the builder count.
+                      </p>
+                      <label className="label" htmlFor="rename-builder-name">
+                        New builder name
+                      </label>
+                      <input
+                        id="rename-builder-name"
+                        className="input"
+                        maxLength={64}
+                        placeholder={`Currently: ${labState.builder}`}
+                        value={renameForm.name}
+                        onChange={(e) =>
+                          setRenameForm({ ...renameForm, name: e.target.value })
+                        }
+                      />
+                      <button
+                        className="btn btn--primary"
+                        type="submit"
+                        disabled={loading === "rename" || requireWallet}
+                      >
+                        {loading === "rename" ? (
+                          <>
+                            <Spinner /> Signing in Freighter…
+                          </>
+                        ) : (
+                          "Sign & rename"
+                        )}
+                      </button>
+                      {!publicKey && <p className="muted">Connect Freighter to sign.</p>}
+                    </form>
+                  ) : (
+                    <form className="form" onSubmit={handleRegister}>
+                      <label className="label" htmlFor="builder-name">
+                        Builder name
+                      </label>
+                      <input
+                        id="builder-name"
+                        className="input"
+                        maxLength={64}
+                        placeholder="e.g. stellar-alice"
+                        value={registerForm.name}
+                        onChange={(e) =>
+                          setRegisterForm({ ...registerForm, name: e.target.value })
+                        }
+                      />
+                      <button
+                        className="btn btn--primary"
+                        type="submit"
+                        disabled={loading === "register" || requireWallet}
+                      >
+                        {loading === "register" ? (
+                          <>
+                            <Spinner /> Signing in Freighter…
+                          </>
+                        ) : (
+                          "Sign & register"
+                        )}
+                      </button>
+                      {!publicKey && <p className="muted">Connect Freighter to sign.</p>}
+                    </form>
+                  )}
                   {lastRegisterTx && (
                     <div className="info-box">
                       <span className="eyebrow">Register tx</span>
