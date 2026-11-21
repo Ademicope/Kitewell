@@ -117,6 +117,7 @@ describe("readKitewellState", () => {
       labName: "Kitewell",
       builderCount: 2,
       builder: "alice",
+      archived: false,
     });
     // Three parallel reads, each a single invokeHostFunction op.
     expect(sorobanServerMock.simulateTransaction).toHaveBeenCalledTimes(3);
@@ -140,7 +141,7 @@ describe("readKitewellState", () => {
 
     const state = await readKitewellState(CONTRACT_ID, null);
 
-    expect(state).toEqual({ labName: "Kitewell", builderCount: 0, builder: null });
+    expect(state).toEqual({ labName: "Kitewell", builderCount: 0, builder: null, archived: false });
   });
 
   it("falls back to the zero address when no viewer is passed", async () => {

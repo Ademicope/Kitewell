@@ -55,7 +55,7 @@ function buildContractTx(contract, method, args, sourceAccount, timeout = 60) {
  * Read-only lookups against the Kitewell registry via Soroban RPC.
  * Calls lab_name(), builder_count(), and get_builder(viewer).
  *
- * @returns {{ labName: string, builderCount: number, builder: string|null }}
+ * @returns {{ labName: string, builderCount: number, builder: string|null, archived: boolean }}
  */
 export async function readKitewellState(contractId, viewerAddress) {
   if (!StellarSdk.StrKey.isValidContract(contractId)) {
@@ -72,22 +72,115 @@ export async function readKitewellState(contractId, viewerAddress) {
     const tx = buildContractTx(contract, method, args, source, 30);
     const sim = await sorobanRpc.simulateTransaction(tx);
     if (sim.error) {
+      // Check if the error indicates the contract is archived
+      if (sim.error.includes("archived") || sim.error.includes("Archived")) {
+        throw new Error("ARCHIVED");
+      }
       throw new Error(`${method}() simulation failed: ${sim.error}`);
     }
     return sim.result?.retval ?? null;
   };
 
-  const [labName, builderCount, builder] = await Promise.all([
-    simulate("lab_name").then((v) => (v ? StellarSdk.scValToNative(v) : null)),
-    simulate("builder_count").then((v) =>
-      v ? StellarSdk.scValToNative(v) : 0
-    ),
-    simulate("get_builder", StellarSdk.nativeToScVal(viewer, { type: "address" })).then(
-      scOptionToNative
-    ),
-  ]);
+  try {
+    const [labName, builderCount, builder] = await Promise.all([
+      simulate("lab_name").then((v) => (v ? StellarSdk.scValToNative(v) : null)),
+      simulate("builder_count").then((v) =>
+        v ? StellarSdk.scValToNative(v) : 0
+      ),
+      simulate("get_builder", StellarSdk.nativeToScVal(viewer, { type: "address" })).then(
+        scOptionToNative
+      ),
+    ]);
 
-  return { labName, builderCount, builder };
+    return { labName, builderCount, builder, archived: false };
+  } catch (error) {
+    if (error.message === "ARCHIVED") {
+      return { labName: null, builderCount: 0, builder: null, archived: true };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Restore an archived Soroban contract instance, making it readable again.
+ * Builds a RestoreFootprint operation for the contract instance ledger key,
+ * signs it with Freighter, and submits it via Soroban RPC.
+ *
+ * @param {string} publicKey - The signing account's public key
+ * @param {string} contractId - The archived contract's C… address
+ * @returns {{ hash: string, confirmed: boolean }}
+ */
+export async function restoreContractWithFreighter(publicKey, contractId) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error(
+      "Contract ID must be a valid Soroban contract strkey (C…)."
+    );
+  }
+
+  // Build the contract instance ledger key
+  const contract = new StellarSdk.Contract(contractId);
+  const contractAddress = new StellarSdk.Address(contractId);
+  const instanceKey = StellarSdk.xdr.LedgerKey.contractData(
+    new StellarSdk.xdr.LedgerKeyContractData({
+      contract: contractAddress.toScAddress(),
+      key: StellarSdk.xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: StellarSdk.xdr.ContractDataDurability.persistent(),
+    })
+  );
+
+  const sourceAccount = await sorobanRpc.getAccount(publicKey);
+  
+  // Build RestoreFootprint operation
+  const restoreOp = StellarSdk.Operation.restoreFootprint({
+    source: publicKey,
+  });
+
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: (100000).toString(), // Higher fee for restore operations
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(restoreOp)
+    .setSorobanData(
+      new StellarSdk.SorobanDataBuilder()
+        .setReadWrite([instanceKey])
+        .build()
+    )
+    .setTimeout(180)
+    .build();
+
+  // Prepare the transaction (fills in resource fees)
+  const prepared = await sorobanRpc.prepareTransaction(transaction);
+  const signedTx = await signWithFreighter(prepared.toXDR(), publicKey);
+  const sendResult = await sorobanRpc.sendTransaction(signedTx);
+
+  if (sendResult.status === "ERROR") {
+    throw new Error(
+      `Restore operation rejected by the network. Tx hash: ${sendResult.hash}`
+    );
+  }
+
+  // Poll for confirmation
+  for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
+    const status = await sorobanRpc.getTransaction(sendResult.hash);
+    if (status.status === "SUCCESS") {
+      return {
+        hash: sendResult.hash,
+        confirmed: true,
+      };
+    }
+    if (status.status === "FAILED") {
+      throw new Error(
+        `Restore operation failed on-chain. Tx hash: ${sendResult.hash}`
+      );
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+
+  // Still pending after the polling window
+  return { hash: sendResult.hash, confirmed: false };
 }
 
 /**

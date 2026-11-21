@@ -7,6 +7,7 @@ import {
   changeTrustWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
+  restoreContractWithFreighter,
 } from "./freighter";
 import { shortenAddress } from "./addressFormat";
 import {
@@ -470,6 +471,34 @@ export default function App() {
       setLabState(state);
     } catch (err) {
       showToast(err.message || "Contract invoke failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleRestore = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    const contractId = labInfo?.network?.contract?.kitewell;
+    if (!contractId) {
+      return showToast(
+        "No contract id configured — deploy first (contracts/README.md).",
+        "error"
+      );
+    }
+    setLoading("restore");
+    try {
+      const result = await restoreContractWithFreighter(publicKey, contractId);
+      showToast(
+        result.confirmed
+          ? `Contract restored · ${result.hash.slice(0, 12)}…`
+          : `Restore submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      // Refresh the contract state after restore
+      await refreshLabState();
+    } catch (err) {
+      showToast(err.message || "Restore operation failed.", "error");
     } finally {
       setLoading("");
     }
@@ -1274,41 +1303,66 @@ export default function App() {
                       Reads lab_name, builder_count, and get_builder via Soroban RPC.
                     </p>
                   )}
+                  {labState?.archived && (
+                    <div className="info-box info-box--warning">
+                      <span className="eyebrow">⚠ Contract archived</span>
+                      <p className="muted" style={{ marginBottom: 12 }}>
+                        The contract entry has expired and needs to be restored before it can be read or invoked again.
+                      </p>
+                      <button
+                        className="btn btn--primary"
+                        type="button"
+                        onClick={handleRestore}
+                        disabled={loading === "restore" || !publicKey}
+                      >
+                        {loading === "restore" ? (
+                          <>
+                            <Spinner /> Restoring…
+                          </>
+                        ) : (
+                          "Restore contract"
+                        )}
+                      </button>
+                      {!publicKey && <p className="muted" style={{ marginTop: 8 }}>Connect Freighter to restore.</p>}
+                    </div>
+                  )}
                   {labStateError && (
                     <div className="info-box info-box--warning">
                       <span className="eyebrow">Soroban RPC</span>
                       <p className="muted">{labStateError}</p>
                     </div>
                   )}
-                  <form className="form" onSubmit={handleRegister}>
-                    <label className="label" htmlFor="builder-name">
-                      Builder name
-                    </label>
-                    <input
-                      id="builder-name"
-                      className="input"
-                      maxLength={64}
-                      placeholder="e.g. stellar-alice"
-                      value={registerForm.name}
-                      onChange={(e) =>
-                        setRegisterForm({ ...registerForm, name: e.target.value })
-                      }
-                    />
-                    <button
-                      className="btn btn--primary"
-                      type="submit"
-                      disabled={loading === "register" || requireWallet}
-                    >
-                      {loading === "register" ? (
-                        <>
-                          <Spinner /> Signing in Freighter…
-                        </>
-                      ) : (
-                        "Sign & register"
-                      )}
-                    </button>
-                    {!publicKey && <p className="muted">Connect Freighter to sign.</p>}
-                  </form>
+                  {!labState?.archived && (
+                    <form className="form" onSubmit={handleRegister}>
+                      <label className="label" htmlFor="builder-name">
+                        Builder name
+                      </label>
+                      <input
+                        id="builder-name"
+                        className="input"
+                        maxLength={64}
+                        placeholder="e.g. stellar-alice"
+                        value={registerForm.name}
+                        onChange={(e) =>
+                          setRegisterForm({ ...registerForm, name: e.target.value })
+                        }
+                      />
+                      <button
+                        className="btn btn--primary"
+                        type="submit"
+                        disabled={loading === "register" || requireWallet}
+                      >
+                        {loading === "register" ? (
+                          <>
+                            <Spinner /> Signing in Freighter…
+                          </>
+                        ) : (
+                          "Sign & register"
+                        )}
+                      </button>
+                      {!publicKey && <p className="muted">Connect Freighter to sign.</p>}
+                    </form>
+                  )}
                   {lastRegisterTx && (
                     <div className="info-box">
                       <span className="eyebrow">Register tx</span>
