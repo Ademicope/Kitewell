@@ -166,6 +166,40 @@ export async function getAccountDetails(publicKey) {
   };
 }
 
+/**
+ * Get all offers (sell and buy) for an account from Horizon.
+ * @param {string} publicKey Account public key
+ * @returns {Promise<Array>} Array of offer objects with offerId, price, and amount
+ */
+export async function getAccountOffers(publicKey) {
+  const server = getServer();
+  const offers = await server
+    .offers()
+    .forAccount(publicKey)
+    .order('desc')
+    .call();
+
+  return offers.records.map((offer) => ({
+    offerId: offer.offerId,
+    selling: offer.selling
+      ? {
+          code: offer.selling.asset_code,
+          issuer: offer.selling.asset_issuer,
+        }
+      : { isNative: offer.selling_is_native },
+    buying: offer.buying
+      ? {
+          code: offer.buying.asset_code,
+          issuer: offer.buying.asset_issuer,
+        }
+      : { isNative: offer.buying_is_native },
+    amount: offer.amount,
+    priceNumerator: offer.price.n ? offer.price.n : offer.price.a,
+    priceDenominator: offer.price.a ? offer.price.a : offer.price.n,
+    seller: offer.seller,
+  }));
+}
+
 export async function getBalance(publicKey) {
   const balances = await getAccountBalances(publicKey);
   const xlm = balances.find((b) => b.isNative);
