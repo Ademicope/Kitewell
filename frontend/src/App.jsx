@@ -5,6 +5,7 @@ import {
   sendPaymentWithFreighter,
   pathPaymentWithFreighter,
   changeTrustWithFreighter,
+  createAccountWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
 } from "./freighter";
@@ -99,6 +100,11 @@ export default function App() {
   const [lastRegisterTx, setLastRegisterTx] = useState(null);
   const tabRefs = useRef([]);
   const [accountDetails, setAccountDetails] = useState(null);
+  const [createAccountForm, setCreateAccountForm] = useState({
+    destination: "",
+    startingBalance: "1",
+  });
+  const [createAccountResult, setCreateAccountResult] = useState(null);
 
   const showToast = (message, type = "success", explorerUrl = null) => {
     setToast({ message, type, explorerUrl });
@@ -190,6 +196,36 @@ export default function App() {
       showToast("Funded with Testnet XLM via Friendbot.");
     } catch (e) {
       showToast(e.message || "Funding failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleCreateAccount = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading("create-account");
+    setCreateAccountResult(null);
+    try {
+      const result = await createAccountWithFreighter(
+        publicKey,
+        createAccountForm.destination,
+        createAccountForm.startingBalance
+      );
+      setCreateAccountResult({
+        destination: createAccountForm.destination,
+        hash: result.hash,
+      });
+      setCreateAccountForm({ destination: "", startingBalance: "1" });
+      try {
+        const next = await getAccountBalances(publicKey);
+        setBalances(next);
+      } catch {
+        /* balance refresh is best-effort */
+      }
+      showToast(`Account created · ${result.hash.slice(0, 12)}…`);
+    } catch (err) {
+      showToast(err.message || "Create account failed.", "error");
     } finally {
       setLoading("");
     }
@@ -780,6 +816,73 @@ export default function App() {
                   "Request Friendbot XLM"
                 )}
               </button>
+              <form className="form" onSubmit={handleCreateAccount}>
+                <h3 className="subhead">Create account from this wallet</h3>
+                <p className="muted">
+                  Create and fund a new Stellar account using XLM from the connected wallet.
+                </p>
+                <label className="label" htmlFor="create-account-key">
+                  New account public key
+                </label>
+                <input
+                  id="create-account-key"
+                  className="input"
+                  value={createAccountForm.destination}
+                  onChange={(e) =>
+                    setCreateAccountForm((prev) => ({
+                      ...prev,
+                      destination: e.target.value,
+                    }))
+                  }
+                  placeholder="G..."
+                  required
+                />
+                <label className="label" htmlFor="create-account-balance">
+                  Starting XLM balance
+                </label>
+                <input
+                  id="create-account-balance"
+                  className="input"
+                  type="number"
+                  min="1"
+                  step="0.0000001"
+                  value={createAccountForm.startingBalance}
+                  onChange={(e) =>
+                    setCreateAccountForm((prev) => ({
+                      ...prev,
+                      startingBalance: e.target.value,
+                    }))
+                  }
+                  required
+                />
+                <button
+                  className="btn btn--primary"
+                  type="submit"
+                  disabled={loading === "create-account" || requireWallet}
+                >
+                  {loading === "create-account" ? (
+                    <>
+                      <Spinner /> Creating…
+                    </>
+                  ) : (
+                    "Create and fund account"
+                  )}
+                </button>
+              </form>
+              {createAccountResult && (
+                <div className="info-box">
+                  <span className="eyebrow">Funding submitted</span>
+                  <code>{createAccountResult.hash}</code>
+                  <a
+                    className="text-link"
+                    href={explorerAccountUrl(createAccountResult.destination)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    View new account on explorer ↗
+                  </a>
+                </div>
+              )}
             </div>
           )}
 

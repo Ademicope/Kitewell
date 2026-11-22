@@ -7,6 +7,7 @@ import {
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { getActiveNetwork } from "./network";
 import { buildAsset, parsePathAssets } from "./stellar";
+import { parseHorizonError } from "./horizonErrorParse";
 
 function getServer() {
   return new StellarSdk.Horizon.Server(getActiveNetwork().horizonUrl);
@@ -243,6 +244,93 @@ async function signWithFreighter(unsignedXdr, publicKey) {
 async function signAndSubmit(transaction, publicKey) {
   const signedTx = await signWithFreighter(transaction.toXDR(), publicKey);
   return getServer().submitTransaction(signedTx);
+}
+
+export function normalizeCreateAccountAmount(amount) {
+  const normalized = String(amount ?? "").trim();
+  if (!/^\d+(?:\.\d{1,7})?$/.test(normalized)) {
+    throw new Error("Starting balance must be at least 1 XLM.");
+  }
+  if (Number(normalized) < 1) {
+    throw new Error("Starting balance must be at least 1 XLM.");
+  }
+  return normalized;
+}
+
+function horizonCreateAccountError(error) {
+  const response =
+    error?.response?.data ||
+    error?.data ||
+    (error?.extras ? error : null);
+  if (response && typeof response === "object") {
+    try {
+      return parseHorizonError({
+        ...response,
+        status: response.status || error?.response?.status || 400,
+      }).reason;
+    } catch {
+      // Fall through to a generic message when Horizon has no structured body.
+    }
+  }
+  return error?.message || "Create account failed.";
+}
+
+/**
+ * Create a funded Stellar account from the connected account.
+ */
+export async function createAccountWithFreighter(
+  publicKey,
+  destination,
+  startingBalance
+) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(destination)) {
+    throw new Error("Destination must be a valid Stellar public key (G…).");
+  }
+  if (destination === publicKey) {
+    throw new Error("Destination must be a new account, not the connected account.");
+  }
+
+  const amount = normalizeCreateAccountAmount(startingBalance);
+  const server = getServer();
+
+  try {
+    await server.loadAccount(destination);
+    throw new Error("Destination account already exists.");
+  } catch (error) {
+    const status =
+      error?.response?.status ||
+      error?.status ||
+      error?.response?.statusCode;
+    if (status !== 404) {
+      if (error?.message === "Destination account already exists.") throw error;
+      throw new Error(
+        `Could not verify the destination account: ${horizonCreateAccountError(error)}`
+      );
+    }
+  }
+
+  const sourceAccount = await server.loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(
+      StellarSdk.Operation.createAccount({
+        destination,
+        startingBalance: amount,
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  try {
+    return await signAndSubmit(transaction, publicKey);
+  } catch (error) {
+    throw new Error(`Create account failed: ${horizonCreateAccountError(error)}`);
+  }
 }
 
 /**
