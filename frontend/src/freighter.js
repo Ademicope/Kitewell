@@ -428,3 +428,150 @@ export async function changeTrustWithFreighter(
 
   return signAndSubmit(transaction, publicKey);
 }
+
+async function getPaymentFee(server) {
+  if (typeof server.feeStats !== "function") return StellarSdk.BASE_FEE;
+
+  try {
+    const stats = await server.feeStats();
+    const charged = stats?.fee_charged;
+    const fee = charged?.p10 ?? charged?.mode ?? charged?.min;
+    const feeNumber = Number(fee);
+    return Number.isSafeInteger(feeNumber) && feeNumber > 0
+      ? feeNumber
+      : StellarSdk.BASE_FEE;
+  } catch {
+    return StellarSdk.BASE_FEE;
+  }
+}
+
+async function dryRunPaymentTransaction(transaction) {
+  if (typeof fetch !== "function") return;
+
+  const network = getActiveNetwork();
+  if (!network?.horizonUrl) return;
+
+  try {
+    const endpoint = new URL("transactions", `${network.horizonUrl}/`);
+    endpoint.searchParams.set("dry_run", "true");
+
+    const response = await fetch(endpoint.toString(), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ tx: transaction.toXDR() }).toString(),
+    });
+
+    if ([404, 405, 501].includes(response.status)) return;
+
+    let result = null;
+    try {
+      result = await response.json();
+    } catch {
+      result = null;
+    }
+
+    if (response.ok) return;
+
+    const resultCodes = result?.extras?.result_codes;
+    const transactionCode =
+      resultCodes?.transaction || result?.transaction_result_code;
+    const horizonRejected = !response.ok && ([400, 422].includes(response.status) || Boolean(
+      resultCodes || result?.transaction_result_code
+    ));
+    const operationCodes = Array.isArray(resultCodes?.operations)
+      ? resultCodes.operations.filter(Boolean).join(", ")
+      : null;
+    const unsuccessfulDryRun = Boolean(
+      transactionCode &&
+      transactionCode !== "tx_success" &&
+      transactionCode !== "success"
+    );
+
+    if (!horizonRejected && !unsuccessfulDryRun) return;
+
+    throw new Error(
+      `Horizon rejected this payment${transactionCode ? ` (${transactionCode}${operationCodes ? `: ${operationCodes}` : ""})` : ""}.`
+    );
+  } catch (error) {
+    if (error?.message?.startsWith("Horizon rejected this payment")) {
+      throw error;
+    }
+    // The endpoint or parameter is not exposed; fee calculation + review still work.
+  }
+}
+
+export async function preparePaymentWithFreighter(
+  publicKey,
+  destination,
+  amount,
+  asset = null,
+  memoType = "text",
+  memo = ""
+) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(destination)) {
+    throw new Error("Destination must be a valid Stellar public key (G…).");
+  }
+
+  const transactionMemo = createMemo(memoType, memo);
+  const paymentAsset = resolvePaymentAsset(asset);
+  const server = getServer();
+  const sourceAccount = await server.loadAccount(publicKey);
+  const fee = await getPaymentFee(server);
+  const txBuilder = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: fee.toString(),
+    networkPassphrase: currentPassphrase(),
+  }).addOperation(
+    StellarSdk.Operation.payment({
+      destination,
+      asset: paymentAsset,
+      amount: amount.toString(),
+    })
+  );
+
+  if (transactionMemo) txBuilder.addMemo(transactionMemo);
+  const transaction = txBuilder.setTimeout(180).build();
+
+  await dryRunPaymentTransaction(transaction);
+
+  return {
+    transaction,
+    summary: {
+      destination,
+      amount: amount.toString(),
+      asset: paymentAsset.isNative()
+        ? "XLM (native)"
+        : `${paymentAsset.getCode()} · ${paymentAsset.getIssuer()}`,
+      memo:
+        memoType === "text" && memo
+          ? `Text: ${memo}`
+          : memoType === "id" && memo
+            ? `ID: ${memo}`
+            : memoType === "hash" && memo
+              ? `Hash: ${memo}`
+              : "None",
+      fee: fee.toString(),
+    },
+  };
+}
+
+export async function confirmPaymentWithFreighter(prepared, publicKey) {
+  if (!prepared?.transaction) {
+    throw new Error("Confirm a prepared payment transaction first.");
+  }
+
+  if (!publicKey) {
+    throw new Error("A connected Stellar account is required.");
+  }
+
+  // Sign the exact transaction shown in the payment review.
+  const signedTx = await signWithFreighter(
+    prepared.transaction.toXDR(),
+    publicKey
+  );
+
+  // Submit only after explicit user confirmation and signing.
+  return getServer().submitTransaction(signedTx);
+}

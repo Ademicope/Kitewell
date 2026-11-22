@@ -2,6 +2,8 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import {
   checkFreighterInstalled,
   connectFreighterWallet,
+  preparePaymentWithFreighter,
+  confirmPaymentWithFreighter,
   sendPaymentWithFreighter,
   pathPaymentWithFreighter,
   changeTrustWithFreighter,
@@ -76,6 +78,15 @@ export default function App() {
     memoType: "text",
     memo: "",
   });
+  const [sendPrepared, setSendPrepared] = useState(null);
+
+  const updateSendForm = (changes) => {
+    setSendForm((previous) => ({
+      ...previous,
+      ...changes,
+    }));
+    setSendPrepared(null);
+  };
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [pathForm, setPathForm] = useState({
     mode: "strictSend",
@@ -282,9 +293,10 @@ export default function App() {
       ? { isNative: true }
       : { isNative: false, code: selected.code, issuer: selected.issuer };
 
+    setSendPrepared(null);
     setLoading("send");
     try {
-      const result = await sendPaymentWithFreighter(
+      const prepared = await preparePaymentWithFreighter(
         publicKey,
         sendForm.destination,
         amount,
@@ -292,8 +304,36 @@ export default function App() {
         sendForm.memoType,
         sendForm.memo
       );
+      setSendPrepared(prepared);
+      showToast("Payment prepared. Confirm in Freighter.");
+    } catch (err) {
+      showToast(err.message || "Payment preparation failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleConfirmSend = async () => {
+    if (!publicKey) {
+      return showToast("Connect Freighter first.", "error");
+    }
+
+    if (!sendPrepared?.transaction) {
+      return showToast("No payment prepared.", "error");
+    }
+
+    setLoading("send");
+
+    try {
+      const result = await confirmPaymentWithFreighter(
+        sendPrepared,
+        publicKey
+      );
+
       const next = await getAccountBalances(publicKey);
       setBalances(next);
+      setSendPrepared(null);
+
       setSendForm({
         destination: "",
         amount: "",
@@ -301,12 +341,14 @@ export default function App() {
         memoType: "text",
         memo: "",
       });
+
       showToast(
         `Payment submitted · ${result.hash.slice(0, 12)}…`,
         "success",
         explorerTxUrl(result.hash)
       );
     } catch (err) {
+      // Preserve form values if the user refuses to sign or submission fails.
       showToast(err.message || "Payment failed.", "error");
     } finally {
       setLoading("");
@@ -909,7 +951,7 @@ export default function App() {
                   type="text"
                   placeholder="G…"
                   value={sendForm.destination}
-                  onChange={(e) => setSendForm({ ...sendForm, destination: e.target.value })}
+                  onChange={(e) => updateSendForm({ destination: e.target.value })}
                   required
                 />
                 <label className="label" htmlFor="send-asset">
@@ -919,7 +961,7 @@ export default function App() {
                   id="send-asset"
                   className="input"
                   value={sendForm.assetKey}
-                  onChange={(e) => setSendForm({ ...sendForm, assetKey: e.target.value })}
+                  onChange={(e) => updateSendForm({ assetKey: e.target.value })}
                 >
                   <option value="native">XLM (native)</option>
                   {balances
@@ -944,7 +986,7 @@ export default function App() {
                   min="0.0000001"
                   placeholder="e.g. 10"
                   value={sendForm.amount}
-                  onChange={(e) => setSendForm({ ...sendForm, amount: e.target.value })}
+                  onChange={(e) => updateSendForm({ amount: e.target.value })}
                   required
                 />
                 <label className="label" htmlFor="send-memo-type">
@@ -955,8 +997,7 @@ export default function App() {
                   className="input"
                   value={sendForm.memoType}
                   onChange={(e) =>
-                    setSendForm({
-                      ...sendForm,
+                    updateSendForm({
                       memoType: e.target.value,
                       memo: "",
                     })
@@ -978,7 +1019,7 @@ export default function App() {
                   inputMode={memoField.inputMode}
                   placeholder={memoField.placeholder}
                   value={sendForm.memo}
-                  onChange={(e) => setSendForm({ ...sendForm, memo: e.target.value })}
+                  onChange={(e) => updateSendForm({ memo: e.target.value })}
                 />
                 <button
                   className="btn btn--primary"
@@ -987,13 +1028,75 @@ export default function App() {
                 >
                   {loading === "send" ? (
                     <>
-                      <Spinner /> Signing in Freighter…
+                      <Spinner /> Preparing payment…
                     </>
                   ) : (
-                    "Sign & send"
+                    "Review payment"
                   )}
                 </button>
               </form>
+
+              {sendPrepared && (
+                <div className="info-box">
+                  <span className="eyebrow">Review payment</span>
+
+                  <p>
+                    <strong>Destination:</strong>
+                    <br />
+                    {sendPrepared.summary.destination}
+                  </p>
+
+                  <p>
+                    <strong>Amount:</strong>
+                    <br />
+                    {sendPrepared.summary.amount}
+                  </p>
+
+                  <p>
+                    <strong>Asset:</strong>
+                    <br />
+                    {sendPrepared.summary.asset}
+                  </p>
+
+                  <p>
+                    <strong>Memo:</strong>
+                    <br />
+                    {sendPrepared.summary.memo}
+                  </p>
+
+                  <p>
+                    <strong>Network fee:</strong>
+                    <br />
+                    {sendPrepared.summary.fee} stroops
+                  </p>
+
+                  <div className="info-box__actions">
+                    <button
+                      className="btn btn--primary"
+                      type="button"
+                      onClick={handleConfirmSend}
+                      disabled={loading === "send"}
+                    >
+                      {loading === "send" ? (
+                        <>
+                          <Spinner /> Waiting for Freighter…
+                        </>
+                      ) : (
+                        "Confirm in Freighter"
+                      )}
+                    </button>
+
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      disabled={loading === "send"}
+                      onClick={() => setSendPrepared(null)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
