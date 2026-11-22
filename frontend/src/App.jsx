@@ -46,6 +46,7 @@ const TABS = [
   "History",
   "Inspect",
   "Lab",
+  "Liquidity",
 ];
 const PATH_MODE_FIELDS = {
   strictSend: {
@@ -85,6 +86,13 @@ export default function App() {
   const [balances, setBalances] = useState([]);
   const [liquidityPools, setLiquidityPools] = useState({});
   const [transactions, setTransactions] = useState([]);
+  const [poolId, setPoolId] = useState("");
+  const [depositAmount, setDepositAmount] = useState("");
+  const [minDepositShares, setMinDepositShares] = useState("1");
+  const [withdrawShares, setWithdrawShares] = useState("");
+  const [minWithdrawReserves, setMinWithdrawReserves] = useState("1");
+  const [liquidityError, setLiquidityError] = useState("");
+  const [liquiditySuccess, setLiquiditySuccess] = useState(false);
   const [nextCursor, setNextCursor] = useState(null);
   const [loading, setLoading] = useState("");
   const [toast, setToast] = useState(null);
@@ -641,6 +649,42 @@ export default function App() {
     }
   };
 
+  const handleLiquidity = async (e) => {
+    e.preventDefault();
+    setLiquidityError("");
+    setLiquiditySuccess(false);
+    try {
+      const pool = await getLiquidityPool(poolId);
+      if (pool.asset_code === pool.buying_asset_code) {
+        setLiquidityError("A pair of the same asset is refused.");
+        return;
+      }
+      if (minDepositShares <= 0 && document.activeElement.id === "min-shares") {
+        setLiquidityError("A minimum out of zero is refused.");
+        return;
+      }
+      if (minWithdrawReserves <= 0 && document.activeElement.id === "min-reserves") {
+        setLiquidityError("A minimum out of zero is refused.");
+        return;
+      }
+      if (depositAmount > 0) {
+        setLiquidityResult(
+          await submitTransaction(
+            liquidityPoolDeposit(poolId, depositAmount, minDepositShares)
+          )
+        );
+      } else if (withdrawShares > 0) {
+        setLiquidityResult(
+          await submitTransaction(
+            liquidityPoolWithdraw(poolId, withdrawShares, minWithdrawReserves)
+          )
+        );
+      }
+    } catch (e) {
+      setLiquidityError(e.message || "Liquidity operation failed.");
+    }
+  };
+
   const activateTab = (tab) => {
     setActiveTab(tab);
     if (tab === "History") handleHistory();
@@ -1003,6 +1047,100 @@ export default function App() {
                     : "No balances yet — fund the account first."}
                 </p>
               )}
+          )
+
+          {activeTab === "Liquidity" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Liquidity Pool</h2>
+                <p className="muted">
+                  Deposit assets into and withdraw from a constant-product liquidity pool.
+                </p>
+              </div>
+              <form className="form" onSubmit={handleLiquidity}>
+                <label className="label" htmlFor="pool-id">
+                  Pool ID (hex)
+                </label>
+                <input
+                  id="pool-id"
+                  className="input"
+                  type="text"
+                  placeholder="e.g. 0x123..."
+                  value={poolId}
+                  onChange={(e) => setPoolId(e.target.value)}
+                  required
+                />
+                <hr />
+                <h3>Deposit</h3>
+                <label className="label" htmlFor="deposit-amount">
+                  Deposit amount (max of each reserve)
+                </label>
+                <input
+                  id="deposit-amount"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 100"
+                  value={depositAmount}
+                  onChange={(e) => setDepositAmount(e.target.value)}
+                  required
+                />
+                <label className="label" htmlFor="min-shares">
+                  Min pool shares (0 to skip)
+                </label>
+                <input
+                  id="min-shares"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 1"
+                  value={minDepositShares}
+                  onChange={(e) => setMinDepositShares(e.target.value)}
+                  required
+                />
+                <hr />
+                <h3>Withdraw</h3>
+                <label className="label" htmlFor="withdraw-shares">
+                  Share amount to withdraw
+                </label>
+                <input
+                  id="withdraw-shares"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 10"
+                  value={withdrawShares}
+                  onChange={(e) => setWithdrawShares(e.target.value)}
+                  required
+                />
+                <label className="label" htmlFor="min-reserves">
+                  Min reserves out
+                </label>
+                <input
+                  id="min-reserves"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 1"
+                  value={minWithdrawReserves}
+                  onChange={(e) => setMinWithdrawReserves(e.target.value)}
+                  required
+                />
+                <hr />
+                <button className="btn btn--primary" type="submit">
+                  Execute
+                </button>
+              </form>
+              {liquidityError && (
+                <div className="info-box info-box--warning" role="alert">
+                  <span className="eyebrow">Liquidity</span>
+                  <p className="muted">{liquidityError}</p>
+                </div>
+              )}
+              {liquiditySuccess && (
+                <div className="info-box info-box--success" role="alert">
+                  <span className="eyebrow">Success</span>
+                  <p className="muted">Liquidity operation complete</p>
+                </div>
+              )}
+            </div>
+          )}
 
               {poolShares.length > 0 && (
                 <div className="section">
@@ -1048,6 +1186,100 @@ export default function App() {
                   ))}
                 </div>
               )}
+          )
+
+          {activeTab === "Liquidity" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Liquidity Pool</h2>
+                <p className="muted">
+                  Deposit assets into and withdraw from a constant-product liquidity pool.
+                </p>
+              </div>
+              <form className="form" onSubmit={handleLiquidity}>
+                <label className="label" htmlFor="pool-id">
+                  Pool ID (hex)
+                </label>
+                <input
+                  id="pool-id"
+                  className="input"
+                  type="text"
+                  placeholder="e.g. 0x123..."
+                  value={poolId}
+                  onChange={(e) => setPoolId(e.target.value)}
+                  required
+                />
+                <hr />
+                <h3>Deposit</h3>
+                <label className="label" htmlFor="deposit-amount">
+                  Deposit amount (max of each reserve)
+                </label>
+                <input
+                  id="deposit-amount"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 100"
+                  value={depositAmount}
+                  onChange={(e) => setDepositAmount(e.target.value)}
+                  required
+                />
+                <label className="label" htmlFor="min-shares">
+                  Min pool shares (0 to skip)
+                </label>
+                <input
+                  id="min-shares"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 1"
+                  value={minDepositShares}
+                  onChange={(e) => setMinDepositShares(e.target.value)}
+                  required
+                />
+                <hr />
+                <h3>Withdraw</h3>
+                <label className="label" htmlFor="withdraw-shares">
+                  Share amount to withdraw
+                </label>
+                <input
+                  id="withdraw-shares"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 10"
+                  value={withdrawShares}
+                  onChange={(e) => setWithdrawShares(e.target.value)}
+                  required
+                />
+                <label className="label" htmlFor="min-reserves">
+                  Min reserves out
+                </label>
+                <input
+                  id="min-reserves"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 1"
+                  value={minWithdrawReserves}
+                  onChange={(e) => setMinWithdrawReserves(e.target.value)}
+                  required
+                />
+                <hr />
+                <button className="btn btn--primary" type="submit">
+                  Execute
+                </button>
+              </form>
+              {liquidityError && (
+                <div className="info-box info-box--warning" role="alert">
+                  <span className="eyebrow">Liquidity</span>
+                  <p className="muted">{liquidityError}</p>
+                </div>
+              )}
+              {liquiditySuccess && (
+                <div className="info-box info-box--success" role="alert">
+                  <span className="eyebrow">Success</span>
+                  <p className="muted">Liquidity operation complete</p>
+                </div>
+              )}
+            </div>
+          )}
 
               <form onSubmit={handleTrust} className="form">
                 <h3 className="subhead">Add trustline</h3>
@@ -1313,6 +1545,100 @@ export default function App() {
                     />
                   </>
                 )}
+          )
+
+          {activeTab === "Liquidity" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Liquidity Pool</h2>
+                <p className="muted">
+                  Deposit assets into and withdraw from a constant-product liquidity pool.
+                </p>
+              </div>
+              <form className="form" onSubmit={handleLiquidity}>
+                <label className="label" htmlFor="pool-id">
+                  Pool ID (hex)
+                </label>
+                <input
+                  id="pool-id"
+                  className="input"
+                  type="text"
+                  placeholder="e.g. 0x123..."
+                  value={poolId}
+                  onChange={(e) => setPoolId(e.target.value)}
+                  required
+                />
+                <hr />
+                <h3>Deposit</h3>
+                <label className="label" htmlFor="deposit-amount">
+                  Deposit amount (max of each reserve)
+                </label>
+                <input
+                  id="deposit-amount"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 100"
+                  value={depositAmount}
+                  onChange={(e) => setDepositAmount(e.target.value)}
+                  required
+                />
+                <label className="label" htmlFor="min-shares">
+                  Min pool shares (0 to skip)
+                </label>
+                <input
+                  id="min-shares"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 1"
+                  value={minDepositShares}
+                  onChange={(e) => setMinDepositShares(e.target.value)}
+                  required
+                />
+                <hr />
+                <h3>Withdraw</h3>
+                <label className="label" htmlFor="withdraw-shares">
+                  Share amount to withdraw
+                </label>
+                <input
+                  id="withdraw-shares"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 10"
+                  value={withdrawShares}
+                  onChange={(e) => setWithdrawShares(e.target.value)}
+                  required
+                />
+                <label className="label" htmlFor="min-reserves">
+                  Min reserves out
+                </label>
+                <input
+                  id="min-reserves"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 1"
+                  value={minWithdrawReserves}
+                  onChange={(e) => setMinWithdrawReserves(e.target.value)}
+                  required
+                />
+                <hr />
+                <button className="btn btn--primary" type="submit">
+                  Execute
+                </button>
+              </form>
+              {liquidityError && (
+                <div className="info-box info-box--warning" role="alert">
+                  <span className="eyebrow">Liquidity</span>
+                  <p className="muted">{liquidityError}</p>
+                </div>
+              )}
+              {liquiditySuccess && (
+                <div className="info-box info-box--success" role="alert">
+                  <span className="eyebrow">Success</span>
+                  <p className="muted">Liquidity operation complete</p>
+                </div>
+              )}
+            </div>
+          )}
 
                 <label className="label" htmlFor="path-dest-asset">
                   Destination asset
@@ -1347,6 +1673,100 @@ export default function App() {
                     />
                   </>
                 )}
+          )
+
+          {activeTab === "Liquidity" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Liquidity Pool</h2>
+                <p className="muted">
+                  Deposit assets into and withdraw from a constant-product liquidity pool.
+                </p>
+              </div>
+              <form className="form" onSubmit={handleLiquidity}>
+                <label className="label" htmlFor="pool-id">
+                  Pool ID (hex)
+                </label>
+                <input
+                  id="pool-id"
+                  className="input"
+                  type="text"
+                  placeholder="e.g. 0x123..."
+                  value={poolId}
+                  onChange={(e) => setPoolId(e.target.value)}
+                  required
+                />
+                <hr />
+                <h3>Deposit</h3>
+                <label className="label" htmlFor="deposit-amount">
+                  Deposit amount (max of each reserve)
+                </label>
+                <input
+                  id="deposit-amount"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 100"
+                  value={depositAmount}
+                  onChange={(e) => setDepositAmount(e.target.value)}
+                  required
+                />
+                <label className="label" htmlFor="min-shares">
+                  Min pool shares (0 to skip)
+                </label>
+                <input
+                  id="min-shares"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 1"
+                  value={minDepositShares}
+                  onChange={(e) => setMinDepositShares(e.target.value)}
+                  required
+                />
+                <hr />
+                <h3>Withdraw</h3>
+                <label className="label" htmlFor="withdraw-shares">
+                  Share amount to withdraw
+                </label>
+                <input
+                  id="withdraw-shares"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 10"
+                  value={withdrawShares}
+                  onChange={(e) => setWithdrawShares(e.target.value)}
+                  required
+                />
+                <label className="label" htmlFor="min-reserves">
+                  Min reserves out
+                </label>
+                <input
+                  id="min-reserves"
+                  className="input"
+                  type="number"
+                  placeholder="e.g. 1"
+                  value={minWithdrawReserves}
+                  onChange={(e) => setMinWithdrawReserves(e.target.value)}
+                  required
+                />
+                <hr />
+                <button className="btn btn--primary" type="submit">
+                  Execute
+                </button>
+              </form>
+              {liquidityError && (
+                <div className="info-box info-box--warning" role="alert">
+                  <span className="eyebrow">Liquidity</span>
+                  <p className="muted">{liquidityError}</p>
+                </div>
+              )}
+              {liquiditySuccess && (
+                <div className="info-box info-box--success" role="alert">
+                  <span className="eyebrow">Success</span>
+                  <p className="muted">Liquidity operation complete</p>
+                </div>
+              )}
+            </div>
+          )}
 
                 <label className="label" htmlFor="path-amount">
                   {pathModeField.amountLabel}

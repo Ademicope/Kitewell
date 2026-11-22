@@ -187,6 +187,42 @@ export async function getLiquidityPool(poolId) {
 }
 
 /**
+ * Build a liquidity pool deposit operation.
+ * Deposits into a constant-product liquidity pool, minting pool shares.
+ *
+ * @param {string} poolId Horizon liquidity-pool id (`hex`).
+ * @param {string} amount Maximum amount of the first reserve to deposit.
+ * @param {string} minShareAmount Minimum pool shares to receive.
+ * @returns {object} The liquidityPoolDeposit operation.
+ */
+export function liquidityPoolDeposit(poolId, amount, minShareAmount) {
+  return {
+    poolId,
+    amount: {
+      max: amount,
+      min: minShareAmount,
+    },
+  };
+}
+
+/**
+ * Build a liquidity pool withdraw operation.
+ * Withdraws from a constant-product liquidity pool, burning pool shares.
+ *
+ * @param {string} poolId Horizon liquidity-pool id (`hex`).
+ * @param {string} shareAmount Amount of pool shares to withdraw.
+ * @param {string} minReserves Minimum amounts of each reserve to receive.
+ * @returns {object} The liquidityPoolWithdraw operation.
+ */
+export function liquidityPoolWithdraw(poolId, shareAmount, minReserves) {
+  return {
+    poolId,
+    shareAmount,
+    minReserves,
+  };
+}
+
+/**
  * Load one page of payment history.
  *
  * @param {string} publicKey Account to page through.
