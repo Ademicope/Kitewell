@@ -52,7 +52,11 @@ const {
   getAccountDetails,
   getBalance,
   getTransactions,
+  formatDataValue,
+  mapAccountDataEntries,
   parsePathAssets,
+  validateDataName,
+  validateDataValue,
 } = await import("./stellar");
 
 /** Minimal Horizon account payload: 3.5 XLM + an issued asset. */
@@ -264,6 +268,27 @@ describe("balance mapping", () => {
       ]),
       explorerUrl: "https://stellar.expert/explorer/testnet/account/GTEST",
     });
+  });
+});
+
+describe("account data helpers", () => {
+  it("maps and sorts account data entries", () => {
+    expect(mapAccountDataEntries({ data: { z: "eg==", a: "aGVsbG8=" } })).toEqual([
+      { name: "a", value: "aGVsbG8=" },
+      { name: "z", value: "eg==" },
+    ]);
+  });
+
+  it("shows valid UTF-8 text and hex for invalid UTF-8", () => {
+    expect(formatDataValue("aGVsbG8=")).toBe("hello");
+    expect(formatDataValue("/w==")).toBe("ff");
+  });
+
+  it("checks data names and values by UTF-8 byte length", () => {
+    expect(validateDataName("é".repeat(32))).toBe("é".repeat(32));
+    expect(() => validateDataName("é".repeat(33))).toThrow(/64 UTF-8 bytes/);
+    expect(validateDataValue("é".repeat(32))).toBe("é".repeat(32));
+    expect(() => validateDataValue("é".repeat(33))).toThrow(/64 UTF-8 bytes/);
   });
 });
 

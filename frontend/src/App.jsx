@@ -5,6 +5,7 @@ import {
   sendPaymentWithFreighter,
   pathPaymentWithFreighter,
   changeTrustWithFreighter,
+  manageDataWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
 } from "./freighter";
@@ -14,6 +15,7 @@ import {
   getAccountBalances,
   getAccountDetails,
   getTransactions,
+  formatDataValue,
   explorerAccountUrl,
   explorerTxUrl,
 } from "./stellar";
@@ -99,6 +101,7 @@ export default function App() {
   const [lastRegisterTx, setLastRegisterTx] = useState(null);
   const tabRefs = useRef([]);
   const [accountDetails, setAccountDetails] = useState(null);
+  const [dataForm, setDataForm] = useState({ name: "", value: "" });
 
   const showToast = (message, type = "success", explorerUrl = null) => {
     setToast({ message, type, explorerUrl });
@@ -144,12 +147,18 @@ export default function App() {
       setPublicKey(address);
       setBalances([]);
       setTransactions([]);
+      setAccountDetails(null);
       showToast("Freighter connected.");
       try {
         const next = await getAccountBalances(address);
         setBalances(next);
       } catch {
         /* unfunded until Friendbot */
+      }
+      try {
+        setAccountDetails(await getAccountDetails(address));
+      } catch {
+        setAccountDetails(null);
       }
     } catch (e) {
       showToast(e.message || "Failed to connect Freighter.", "error");
@@ -243,6 +252,51 @@ export default function App() {
       showToast(`${asset.code} trustline removed.`);
     } catch (err) {
       showToast(err.message || `Could not remove the ${asset.code} trustline.`, "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const refreshAccountDetails = async () => {
+    if (!publicKey) return;
+    try {
+      setAccountDetails(await getAccountDetails(publicKey));
+    } catch {
+      setAccountDetails(null);
+    }
+  };
+
+  const handleSetData = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!dataForm.name) return showToast("Data name is required.", "error");
+
+    setLoading("data-set");
+    try {
+      await manageDataWithFreighter(
+        publicKey,
+        dataForm.name,
+        dataForm.value
+      );
+      setDataForm({ name: "", value: "" });
+      await refreshAccountDetails();
+      showToast("Account data submitted.");
+    } catch (err) {
+      showToast(err.message || "Could not set account data.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleClearData = async (name) => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading(`data-clear-${name}`);
+    try {
+      await manageDataWithFreighter(publicKey, name, null);
+      await refreshAccountDetails();
+      showToast(`Cleared account data "${name}".`);
+    } catch (err) {
+      showToast(err.message || `Could not clear "${name}".`, "error");
     } finally {
       setLoading("");
     }
@@ -735,6 +789,63 @@ export default function App() {
                       >
                         StellarExpert ↗
                       </a>
+                    </div>
+                  )}
+                  {accountDetails && (
+                    <div className="info-box">
+                      <span className="eyebrow">Manage data</span>
+                      {accountDetails.dataEntries?.length ? (
+                        <ul className="data-list">
+                          {accountDetails.dataEntries.map((entry) => (
+                            <li className="data-row" key={entry.name}>
+                              <div className="data-row__content">
+                                <span className="metadata-label">{entry.name}</span>
+                                <code>{formatDataValue(entry.value)}</code>
+                              </div>
+                              <button
+                                className="btn btn--secondary btn--sm"
+                                type="button"
+                                onClick={() => handleClearData(entry.name)}
+                                disabled={loading === `data-clear-${entry.name}`}
+                              >
+                                Clear
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="muted">No account data entries.</p>
+                      )}
+                      <form className="form data-form" onSubmit={handleSetData}>
+                        <label className="label" htmlFor="data-name">Name</label>
+                        <input
+                          id="data-name"
+                          className="input"
+                          value={dataForm.name}
+                          maxLength={64}
+                          onChange={(e) =>
+                            setDataForm((prev) => ({ ...prev, name: e.target.value }))
+                          }
+                          placeholder="Up to 64 UTF-8 bytes"
+                        />
+                        <label className="label" htmlFor="data-value">Value</label>
+                        <input
+                          id="data-value"
+                          className="input"
+                          value={dataForm.value}
+                          onChange={(e) =>
+                            setDataForm((prev) => ({ ...prev, value: e.target.value }))
+                          }
+                          placeholder="Up to 64 UTF-8 bytes"
+                        />
+                        <button
+                          className="btn btn--primary"
+                          type="submit"
+                          disabled={loading === "data-set"}
+                        >
+                          Set data
+                        </button>
+                      </form>
                     </div>
                   )}
                   <button className="btn btn--secondary" type="button" onClick={handleDisconnect}>

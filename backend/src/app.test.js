@@ -223,6 +223,7 @@ test("GET /api/account/:address maps a Horizon account into the API body", async
         isNative: false,
       },
     ],
+    dataEntries: [],
     explorerUrl: `https://explorer.test.invalid/account/${VALID_ADDRESS}`,
   });
 });

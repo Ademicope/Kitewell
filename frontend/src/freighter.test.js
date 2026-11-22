@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * - The real SDK is used for tx building, XDR round-trips, and scVal decoding.
  */
 
-const { sorobanServerMock, signTransactionMock } = vi.hoisted(() => ({
+const { sorobanServerMock, signTransactionMock, horizonLoadAccountMock, horizonSubmitMock } = vi.hoisted(() => ({
   sorobanServerMock: {
     simulateTransaction: vi.fn(),
     prepareTransaction: vi.fn(),
@@ -18,6 +18,8 @@ const { sorobanServerMock, signTransactionMock } = vi.hoisted(() => ({
     getAccount: vi.fn(),
   },
   signTransactionMock: vi.fn(),
+  horizonLoadAccountMock: vi.fn(),
+  horizonSubmitMock: vi.fn(),
 }));
 
 vi.mock("@stellar/freighter-api", () => ({
@@ -31,6 +33,15 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
+    Horizon: {
+      ...actual.Horizon,
+      Server: vi.fn(function () {
+        return {
+          loadAccount: horizonLoadAccountMock,
+          submitTransaction: horizonSubmitMock,
+        };
+      }),
+    },
     rpc: {
       ...actual.rpc,
       Server: vi.fn(function () {
@@ -45,6 +56,7 @@ const {
   SOROBAN_RPC_URL,
   readKitewellState,
   registerBuilderWithFreighter,
+  manageDataWithFreighter,
 } = await import("./freighter");
 
 const CONTRACT_ID =
@@ -175,6 +187,49 @@ describe("readKitewellState", () => {
       "valid Soroban contract"
     );
     expect(sorobanServerMock.simulateTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("manageDataWithFreighter", () => {
+  it("refuses names and values longer than 64 UTF-8 bytes before signing", async () => {
+    await expect(
+      manageDataWithFreighter(USER, "é".repeat(33), "value")
+    ).rejects.toThrow("64 UTF-8 bytes");
+    await expect(
+      manageDataWithFreighter(USER, "name", "é".repeat(33))
+    ).rejects.toThrow("64 UTF-8 bytes");
+    expect(signTransactionMock).not.toHaveBeenCalled();
+  });
+
+  it("builds set and clear manageData operations", async () => {
+    horizonLoadAccountMock.mockResolvedValue(new StellarSdk.Account(USER, "7"));
+    signTransactionMock.mockResolvedValue({
+      signedTxXdr: null,
+      error: { message: "stop after building" },
+    });
+
+    await expect(
+      manageDataWithFreighter(USER, "profile", "hello")
+    ).rejects.toThrow("stop after building");
+
+    const setXdr = signTransactionMock.mock.calls[0][0];
+    const setTx = StellarSdk.TransactionBuilder.fromXDR(
+      setXdr,
+      StellarSdk.Networks.TESTNET
+    );
+    expect(setTx.operations[0].type).toBe("manageData");
+    expect(setTx.operations[0].name).toBe("profile");
+    expect(setTx.operations[0].value.toString("utf8")).toBe("hello");
+
+    await expect(manageDataWithFreighter(USER, "profile", null)).rejects.toThrow(
+      "stop after building"
+    );
+    const clearXdr = signTransactionMock.mock.calls[1][0];
+    const clearTx = StellarSdk.TransactionBuilder.fromXDR(
+      clearXdr,
+      StellarSdk.Networks.TESTNET
+    );
+    expect(clearTx.operations[0].value ?? null).toBeNull();
   });
 });
 

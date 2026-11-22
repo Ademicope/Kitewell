@@ -5,8 +5,14 @@ import {
   signTransaction,
 } from "@stellar/freighter-api";
 import * as StellarSdk from "@stellar/stellar-sdk";
+import { Buffer } from "buffer";
 import { getActiveNetwork } from "./network";
-import { buildAsset, parsePathAssets } from "./stellar";
+import {
+  buildAsset,
+  parsePathAssets,
+  validateDataName,
+  validateDataValue,
+} from "./stellar";
 
 function getServer() {
   return new StellarSdk.Horizon.Server(getActiveNetwork().horizonUrl);
@@ -428,3 +434,45 @@ export async function changeTrustWithFreighter(
 
   return signAndSubmit(transaction, publicKey);
 }
+
+/**
+ * Set or clear one account data entry.
+ * Passing null (or no value) clears the name; otherwise value is UTF-8.
+ */
+export async function manageDataWithFreighter(publicKey, name, value = null) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+
+  const normalizedName = validateDataName(name);
+  const normalizedValue =
+    value === null || value === undefined
+      ? null
+      : Buffer.from(validateDataValue(value), "utf8");
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(
+      StellarSdk.Operation.manageData({
+        name: normalizedName,
+        value: normalizedValue,
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  return signAndSubmit(transaction, publicKey);
+}
+
+export async function setAccountDataWithFreighter(publicKey, name, value) {
+  return manageDataWithFreighter(publicKey, name, value);
+}
+
+export async function clearAccountDataWithFreighter(publicKey, name) {
+  return manageDataWithFreighter(publicKey, name, null);
+}
+
+export const manageDataEntryWithFreighter = manageDataWithFreighter;
