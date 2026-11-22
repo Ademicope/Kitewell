@@ -8,12 +8,8 @@ import {
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { findNetworkByPassphrase, getActiveNetwork } from "./network";
 import { buildAsset, parsePathAssets } from "./stellar";
+import { getTransactionFailure } from "./horizonErrorParse";
 import {
-  getTransactionFailure,
-  parseHorizonError,
-} from "./horizonErrorParse";
-import {
-  HORIZON_FAILURE_CODE,
   freighterCancelledError,
   horizonFailureError,
 } from "./submitFailure";
@@ -290,24 +286,24 @@ async function signWithFreighter(unsignedXdr, publicKey) {
   );
 }
 
-async function signAndSubmit(transaction, publicKey) {
-  const signedTx = await signWithFreighter(transaction.toXDR(), publicKey);
+async function submitSignedTransaction(signedTx) {
   try {
     return await getServer().submitTransaction(signedTx);
   } catch (error) {
-    const body = error?.response?.data;
-    if (body && typeof body === "object") {
-      try {
-        const { reason } = parseHorizonError(body);
-        const failureError = horizonFailureError(reason, error);
-        failureError.transactionFailure = getTransactionFailure(error);
-        throw failureError;
-      } catch (maybeWrapped) {
-        if (maybeWrapped?.code === HORIZON_FAILURE_CODE) throw maybeWrapped;
-      }
-    }
-    throw error;
+    const transactionFailure = getTransactionFailure(error);
+    if (!transactionFailure) throw error;
+
+    const failureError = horizonFailureError(
+      "Transaction failed on the network."
+    );
+    failureError.transactionFailure = transactionFailure;
+    throw failureError;
   }
+}
+
+async function signAndSubmit(transaction, publicKey) {
+  const signedTx = await signWithFreighter(transaction.toXDR(), publicKey);
+  return submitSignedTransaction(signedTx);
 }
 
 /**
@@ -426,7 +422,7 @@ export async function submitEnvelopeWithFreighter(unsignedXdr, publicKey) {
   }
 
   const signedTx = await signWithFreighter(unsignedXdr, publicKey);
-  return getServer().submitTransaction(signedTx);
+  return submitSignedTransaction(signedTx);
 }
 
 /**
