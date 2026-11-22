@@ -160,6 +160,34 @@ export async function getBalance(publicKey) {
   return xlm ? xlm.balance : "0";
 }
 
+export async function getClaimableBalances(publicKey) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+
+  const page = await getServer()
+    .claimableBalances()
+    .claimant(publicKey)
+    .limit(200)
+    .order("desc")
+    .call();
+
+  return (page.records || []).map((balance) => ({
+    id: balance.id,
+    asset:
+      balance.asset === "native"
+        ? "XLM"
+        : `${balance.asset_code || balance.asset}`,
+    assetCode: balance.asset_code,
+    assetIssuer: balance.asset_issuer,
+    amount: balance.amount,
+    claimants: balance.claimants || [],
+    sponsor: balance.sponsor || null,
+  }));
+}
+
+export const listClaimableBalances = getClaimableBalances;
+
 /**
  * Load one page of payment history.
  *

@@ -245,6 +245,105 @@ async function signAndSubmit(transaction, publicKey) {
   return getServer().submitTransaction(signedTx);
 }
 
+export function buildClaimPredicate(mode, ledgerTime) {
+  if (mode === "unconditional") {
+    return StellarSdk.Claimant.predicateUnconditional();
+  }
+
+  const normalized = String(ledgerTime ?? "").trim();
+  if (!/^\d+$/.test(normalized) || BigInt(normalized) < 0n) {
+    throw new Error("Ledger time must be a non-negative Unix timestamp.");
+  }
+
+  const before = StellarSdk.Claimant.predicateBeforeAbsoluteTime(normalized);
+  if (mode === "notBefore") {
+    return StellarSdk.Claimant.predicateNot(before);
+  }
+  if (mode === "notAfter") {
+    return before;
+  }
+  throw new Error("Unsupported claim predicate.");
+}
+
+export async function createClaimableBalanceWithFreighter({
+  publicKey,
+  claimant,
+  amount,
+  asset,
+  predicateMode = "unconditional",
+  ledgerTime = "",
+} = {}) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(claimant)) {
+    throw new Error("Claimant must be a valid Stellar public key (G…).");
+  }
+  if (!asset) {
+    throw new Error("Choose an asset you hold.");
+  }
+
+  const normalizedAmount = normalizeAmount(amount, "Claimable balance amount");
+  if (parseFloat(normalizedAmount) <= 0) {
+    throw new Error("Claimable balance amount must be greater than zero.");
+  }
+
+  const sdkAsset = asset.isNative
+    ? StellarSdk.Asset.native()
+    : new StellarSdk.Asset(asset.code, asset.issuer);
+  const predicate = buildClaimPredicate(predicateMode, ledgerTime);
+  const claimants = [new StellarSdk.Claimant(claimant, predicate)];
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(
+      StellarSdk.Operation.createClaimableBalance({
+        asset: sdkAsset,
+        amount: normalizedAmount,
+        claimants,
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  return signAndSubmit(transaction, publicKey);
+}
+
+export async function claimClaimableBalanceWithFreighter(publicKey, balanceId) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+  if (!/^([0-9a-fA-F]{72}|B[1-9A-HJ-NP-Za-km-z]{55})$/.test(balanceId || "")) {
+    throw new Error("A valid claimable balance ID is required.");
+  }
+
+  const normalizedId =
+    typeof balanceId === "string" && balanceId.startsWith("B")
+      ? StellarSdk.StrKey.decodeClaimableBalance(balanceId).toString("hex")
+      : balanceId;
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(
+      StellarSdk.Operation.claimClaimableBalance({
+        balanceId: normalizedId,
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  return signAndSubmit(transaction, publicKey);
+}
+
+export const createClaimableBalance = createClaimableBalanceWithFreighter;
+export const claimClaimableBalance = claimClaimableBalanceWithFreighter;
+
 /**
  * Validate a Stellar amount string (positive, max 7 decimal places) without
  * going through floating point, so values like 0.0000001 stay intact.
