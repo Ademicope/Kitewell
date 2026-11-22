@@ -109,6 +109,7 @@ export function createApp({ horizon, env = process.env } = {}) {
         subentryCount: account.subentry_count,
         thresholds: account.thresholds,
         balances,
+        signers: account.signers || [],
         dataEntries: Object.entries(account.data || {})
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([name, value]) => ({ name, value })),

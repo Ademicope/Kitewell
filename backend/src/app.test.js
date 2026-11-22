@@ -205,6 +205,7 @@ test("GET /api/account/:address maps a Horizon account into the API body", async
     sequence: "123456789012345678",
     subentryCount: 1,
     thresholds: { low_threshold: 1, med_threshold: 2, high_threshold: 3 },
+    signers: [],
     balances: [
       {
         key: "native",

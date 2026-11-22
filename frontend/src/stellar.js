@@ -97,6 +97,100 @@ export const formatAccountDataValue = formatDataValue;
 export const validateManageDataName = validateDataName;
 export const validateManageDataValue = validateDataValue;
 
+export function validateAccountMerge(source, destination, retypeDestination) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(source)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(destination)) {
+    throw new Error("Destination must be a valid Stellar public key (G…).");
+  }
+  if (destination === source) {
+    throw new Error("The destination account cannot be the connected account.");
+  }
+  if (retypeDestination !== destination) {
+    throw new Error("Retype the destination public key exactly as it appears.");
+  }
+  return destination;
+}
+
+export function mergeBlockersFromAccount(account) {
+  const blockers = [];
+
+  const trustlines = (account?.balances || []).filter(
+    (balance) =>
+      balance &&
+      (balance.asset_type === "credit_alphanum4" ||
+        balance.asset_type === "credit_alphanum12" ||
+        (!balance.isNative && balance.asset_code))
+  );
+  if (trustlines.length) {
+    blockers.push(
+      `Trustlines: ${trustlines
+        .map((balance) => balance.asset_code || balance.code || "unknown")
+        .join(", ")}`
+    );
+  }
+
+  if (Array.isArray(account?.signers) && account.signers.length > 1) {
+    blockers.push(
+      `Signers: ${account.signers
+        .map((signer) => signer.key)
+        .filter(Boolean)
+        .join(", ")}`
+    );
+  }
+
+  const offers = Array.isArray(account?.offers)
+    ? account.offers
+    : Array.isArray(account?.openOffers)
+      ? account.openOffers
+      : [];
+  if (offers.length) {
+    blockers.push(
+      `Offers: ${offers
+        .map((offer) => offer.id)
+        .filter(Boolean)
+        .join(", ") || `${offers.length} open offer(s)`}`
+    );
+  }
+
+  return blockers;
+}
+
+export async function getAccountMergeBlockers(publicKey) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+
+  let account;
+  if (backendIsUsable()) {
+    try {
+      account = await fetchAccountViaApi(publicKey);
+    } catch {
+      account = await getServer().loadAccount(publicKey);
+    }
+  } else {
+    account = await getServer().loadAccount(publicKey);
+  }
+
+  try {
+    const page = await getServer()
+      .offers()
+      .forSeller(publicKey)
+      .limit(200)
+      .order("asc")
+      .call();
+    account = { ...account, offers: page.records || page };
+  } catch {
+    account = { ...account, offers: account.offers || [] };
+  }
+
+  return mergeBlockersFromAccount(account);
+}
+
+export const accountMergeBlockers = mergeBlockersFromAccount;
+export const validateAccountMergeDestination = validateAccountMerge;
+
 /**
  * Convert a simple UI asset descriptor into an SDK Asset.
  * Native XLM is `{ isNative: true }`; a credit asset is
@@ -223,6 +317,7 @@ export async function getAccountDetails(publicKey) {
     thresholds: account.thresholds,
     balances: mapHorizonBalances(account),
     dataEntries: mapAccountDataEntries(account),
+    signers: account.signers || [],
     explorerUrl: explorerAccountUrl(publicKey),
   };
 }

@@ -6,6 +6,7 @@ import {
   pathPaymentWithFreighter,
   changeTrustWithFreighter,
   manageDataWithFreighter,
+  mergeAccountWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
 } from "./freighter";
@@ -102,6 +103,10 @@ export default function App() {
   const tabRefs = useRef([]);
   const [accountDetails, setAccountDetails] = useState(null);
   const [dataForm, setDataForm] = useState({ name: "", value: "" });
+  const [mergeForm, setMergeForm] = useState({
+    destination: "",
+    retypeDestination: "",
+  });
 
   const showToast = (message, type = "success", explorerUrl = null) => {
     setToast({ message, type, explorerUrl });
@@ -297,6 +302,33 @@ export default function App() {
       showToast(`Cleared account data "${name}".`);
     } catch (err) {
       showToast(err.message || `Could not clear "${name}".`, "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleMergeAccount = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading("merge");
+    try {
+      const result = await mergeAccountWithFreighter(
+        publicKey,
+        mergeForm.destination,
+        mergeForm.retypeDestination
+      );
+      showToast(
+        `Account merge submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      setPublicKey(null);
+      setBalances([]);
+      setTransactions([]);
+      setAccountDetails(null);
+      setMergeForm({ destination: "", retypeDestination: "" });
+    } catch (err) {
+      showToast(err.message || "Account merge failed.", "error");
     } finally {
       setLoading("");
     }
@@ -848,6 +880,59 @@ export default function App() {
                       </form>
                     </div>
                   )}
+                  <div className="info-box info-box--warning">
+                    <span className="eyebrow">Merge connected account</span>
+                    <p className="muted">
+                      This irreversibly removes the connected account and sends its entire
+                      XLM balance to the destination account. Trustlines, open offers, and
+                      extra signers must be removed first.
+                    </p>
+                    <form className="form data-form" onSubmit={handleMergeAccount}>
+                      <label className="label" htmlFor="merge-destination">
+                        Destination public key
+                      </label>
+                      <input
+                        id="merge-destination"
+                        className="input"
+                        value={mergeForm.destination}
+                        onChange={(e) =>
+                          setMergeForm((prev) => ({
+                            ...prev,
+                            destination: e.target.value,
+                          }))
+                        }
+                        placeholder="G..."
+                      />
+                      <label className="label" htmlFor="merge-retype">
+                        Retype destination public key
+                      </label>
+                      <input
+                        id="merge-retype"
+                        className="input"
+                        value={mergeForm.retypeDestination}
+                        onChange={(e) =>
+                          setMergeForm((prev) => ({
+                            ...prev,
+                            retypeDestination: e.target.value,
+                          }))
+                        }
+                        placeholder="Type the destination again"
+                      />
+                      <button
+                        className="btn btn--primary"
+                        type="submit"
+                        disabled={loading === "merge"}
+                      >
+                        {loading === "merge" ? (
+                          <>
+                            <Spinner /> Checking merge…
+                          </>
+                        ) : (
+                          "Merge account"
+                        )}
+                      </button>
+                    </form>
+                  </div>
                   <button className="btn btn--secondary" type="button" onClick={handleDisconnect}>
                     Disconnect
                   </button>

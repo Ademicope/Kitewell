@@ -9,9 +9,11 @@ import { Buffer } from "buffer";
 import { getActiveNetwork } from "./network";
 import {
   buildAsset,
+  getAccountMergeBlockers,
   parsePathAssets,
   validateDataName,
   validateDataValue,
+  validateAccountMerge,
 } from "./stellar";
 
 function getServer() {
@@ -250,6 +252,52 @@ async function signAndSubmit(transaction, publicKey) {
   const signedTx = await signWithFreighter(transaction.toXDR(), publicKey);
   return getServer().submitTransaction(signedTx);
 }
+
+/**
+ * Merge the connected account into a destination account.
+ *
+ * The source's full XLM balance is transferred and the source account is
+ * removed. Blockers and confirmation are deliberately checked before Freighter
+ * is called.
+ */
+export async function mergeAccountWithFreighter(
+  publicKey,
+  destination,
+  retypeDestination
+) {
+  if (typeof publicKey === "object" && publicKey !== null) {
+    destination = publicKey.destination;
+    retypeDestination = publicKey.retypeDestination;
+    publicKey = publicKey.publicKey;
+  }
+
+  validateAccountMerge(publicKey, destination, retypeDestination);
+
+  const blockers = await getAccountMergeBlockers(publicKey);
+  if (blockers.length) {
+    throw new Error(
+      `Account cannot be merged. Remove these blockers first: ${blockers.join("; ")}`
+    );
+  }
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(
+      StellarSdk.Operation.accountMerge({
+        destination,
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  return signAndSubmit(transaction, publicKey);
+}
+
+export const mergeAccount = mergeAccountWithFreighter;
+export const accountMergeWithFreighter = mergeAccountWithFreighter;
 
 /**
  * Validate a Stellar amount string (positive, max 7 decimal places) without

@@ -57,6 +57,8 @@ const {
   parsePathAssets,
   validateDataName,
   validateDataValue,
+  validateAccountMerge,
+  mergeBlockersFromAccount,
 } = await import("./stellar");
 
 /** Minimal Horizon account payload: 3.5 XLM + an issued asset. */
@@ -268,6 +270,40 @@ describe("balance mapping", () => {
       ]),
       explorerUrl: "https://stellar.expert/explorer/testnet/account/GTEST",
     });
+  });
+});
+
+describe("account merge helpers", () => {
+  it("refuses the source as destination and mismatched retypes", () => {
+    const source = StellarSdk.Keypair.random().publicKey();
+    const destination = StellarSdk.Keypair.random().publicKey();
+
+    expect(() =>
+      validateAccountMerge(source, source, source)
+    ).toThrow(/cannot be the connected account/);
+    expect(() =>
+      validateAccountMerge(source, destination, `${destination}x`)
+    ).toThrow(/Retype the destination/);
+  });
+
+  it("lists trustlines, signers, and open offers as blockers", () => {
+    const blockers = mergeBlockersFromAccount({
+      balances: [
+        { asset_type: "native", balance: "1" },
+        { asset_type: "credit_alphanum4", asset_code: "USDC" },
+      ],
+      signers: [
+        { key: "GSELF" },
+        { key: "GEXTRA" },
+      ],
+      offers: [{ id: "123" }],
+    });
+
+    expect(blockers).toEqual([
+      "Trustlines: USDC",
+      "Signers: GSELF, GEXTRA",
+      "Offers: 123",
+    ]);
   });
 });
 
