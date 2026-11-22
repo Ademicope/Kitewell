@@ -7,6 +7,9 @@ import {
   changeTrustWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
+  readAdminState,
+  proposeAdminWithFreighter,
+  acceptAdminWithFreighter,
 } from "./freighter";
 import { shortenAddress } from "./addressFormat";
 import {
@@ -95,6 +98,8 @@ export default function App() {
   const [labError, setLabError] = useState(null);
   const [labState, setLabState] = useState(null);
   const [labStateError, setLabStateError] = useState(null);
+  const [adminState, setAdminState] = useState(null);
+  const [proposeAdminForm, setProposeAdminForm] = useState({ address: "" });
   const [registerForm, setRegisterForm] = useState({ name: "" });
   const [lastRegisterTx, setLastRegisterTx] = useState(null);
   const tabRefs = useRef([]);
@@ -421,13 +426,18 @@ export default function App() {
     if (!contractId) {
       setLabState(null);
       setLabStateError(null);
+      setAdminState(null);
       return;
     }
     setLoading("labstate");
     setLabStateError(null);
     try {
-      const state = await readKitewellState(contractId, publicKey);
+      const [state, admin] = await Promise.all([
+        readKitewellState(contractId, publicKey),
+        readAdminState(contractId),
+      ]);
       setLabState(state);
+      setAdminState(admin);
     } catch (e) {
       setLabState(null);
       setLabStateError(
@@ -470,6 +480,69 @@ export default function App() {
       setLabState(state);
     } catch (err) {
       showToast(err.message || "Contract invoke failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleProposeAdmin = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    const contractId = labInfo?.network?.contract?.kitewell;
+    if (!contractId) {
+      return showToast(
+        "No contract id configured — deploy first (contracts/README.md).",
+        "error"
+      );
+    }
+    if (!proposeAdminForm.address.trim()) {
+      return showToast("Enter a successor admin address.", "error");
+    }
+    setLoading("propose-admin");
+    try {
+      const result = await proposeAdminWithFreighter(
+        publicKey,
+        contractId,
+        proposeAdminForm.address.trim()
+      );
+      setProposeAdminForm({ address: "" });
+      showToast(
+        result.confirmed
+          ? `Admin proposed · ${result.hash.slice(0, 12)}…`
+          : `Submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      await refreshLabState();
+    } catch (err) {
+      showToast(err.message || "Propose admin failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleAcceptAdmin = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    const contractId = labInfo?.network?.contract?.kitewell;
+    if (!contractId) {
+      return showToast(
+        "No contract id configured — deploy first (contracts/README.md).",
+        "error"
+      );
+    }
+    setLoading("accept-admin");
+    try {
+      const result = await acceptAdminWithFreighter(publicKey, contractId);
+      showToast(
+        result.confirmed
+          ? `Admin accepted · ${result.hash.slice(0, 12)}…`
+          : `Submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      await refreshLabState();
+    } catch (err) {
+      showToast(err.message || "Accept admin failed.", "error");
     } finally {
       setLoading("");
     }
@@ -1273,6 +1346,75 @@ export default function App() {
                     <p className="muted">
                       Reads lab_name, builder_count, and get_builder via Soroban RPC.
                     </p>
+                  )}
+                  {adminState && (
+                    <div className="info-box">
+                      <span className="eyebrow">Admin</span>
+                      <div style={{ marginBottom: 12 }}>
+                        <span className="metadata-label">Current admin</span>
+                        <code style={{ display: "block", marginTop: 4 }}>
+                          {adminState.admin ? shortenAddress(adminState.admin) : "Not initialized"}
+                        </code>
+                      </div>
+                      {adminState.pendingAdmin && (
+                        <div style={{ marginBottom: 12 }}>
+                          <span className="metadata-label">Pending admin</span>
+                          <code style={{ display: "block", marginTop: 4 }}>
+                            {shortenAddress(adminState.pendingAdmin)}
+                          </code>
+                        </div>
+                      )}
+                      {publicKey === adminState.admin && (
+                        <form onSubmit={handleProposeAdmin} style={{ marginTop: 12 }}>
+                          <label className="label" htmlFor="propose-admin-address">
+                            Propose successor admin
+                          </label>
+                          <input
+                            id="propose-admin-address"
+                            className="input"
+                            placeholder="G… address"
+                            value={proposeAdminForm.address}
+                            onChange={(e) =>
+                              setProposeAdminForm({ address: e.target.value })
+                            }
+                          />
+                          <button
+                            className="btn btn--primary"
+                            type="submit"
+                            disabled={loading === "propose-admin"}
+                          >
+                            {loading === "propose-admin" ? (
+                              <>
+                                <Spinner /> Proposing…
+                              </>
+                            ) : (
+                              "Propose admin"
+                            )}
+                          </button>
+                        </form>
+                      )}
+                      {publicKey === adminState.pendingAdmin && (
+                        <div style={{ marginTop: 12 }}>
+                          <p className="muted" style={{ marginBottom: 8 }}>
+                            You are the pending admin. Accept to become the live admin.
+                          </p>
+                          <button
+                            className="btn btn--primary"
+                            type="button"
+                            onClick={handleAcceptAdmin}
+                            disabled={loading === "accept-admin"}
+                          >
+                            {loading === "accept-admin" ? (
+                              <>
+                                <Spinner /> Accepting…
+                              </>
+                            ) : (
+                              "Accept admin"
+                            )}
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
                   {labStateError && (
                     <div className="info-box info-box--warning">

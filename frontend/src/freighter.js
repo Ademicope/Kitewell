@@ -91,6 +91,161 @@ export async function readKitewellState(contractId, viewerAddress) {
 }
 
 /**
+ * Read admin addresses from the Kitewell contract.
+ * Calls get_admin() and get_pending_admin() via Soroban RPC.
+ *
+ * @param {string} contractId - The contract's C… address
+ * @returns {Promise<{ admin: string|null, pendingAdmin: string|null }>}
+ */
+export async function readAdminState(contractId) {
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error(
+      "Contract ID must be a valid Soroban contract strkey (C…)."
+    );
+  }
+
+  const contract = new StellarSdk.Contract(contractId);
+  const source = new StellarSdk.Account(ZERO_ADDRESS, "0");
+
+  const simulate = async (method) => {
+    const tx = buildContractTx(contract, method, [], source, 30);
+    const sim = await sorobanRpc.simulateTransaction(tx);
+    if (sim.error) {
+      throw new Error(`${method}() simulation failed: ${sim.error}`);
+    }
+    return sim.result?.retval ?? null;
+  };
+
+  const [admin, pendingAdmin] = await Promise.all([
+    simulate("get_admin").then(scOptionToNative),
+    simulate("get_pending_admin").then(scOptionToNative),
+  ]);
+
+  return { admin, pendingAdmin };
+}
+
+/**
+ * Propose a successor admin for the Kitewell contract.
+ * Only the current admin can call this. The proposal does not move admin
+ * rights by itself — the successor must call accept_admin.
+ *
+ * @param {string} publicKey - Current admin's public key
+ * @param {string} contractId - The contract's C… address
+ * @param {string} newAdminAddress - The proposed successor's address
+ * @returns {Promise<{ hash: string, confirmed: boolean }>}
+ */
+export async function proposeAdminWithFreighter(
+  publicKey,
+  contractId,
+  newAdminAddress
+) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Current admin address is invalid.");
+  }
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error(
+      "Contract ID must be a valid Soroban contract strkey (C…)."
+    );
+  }
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(newAdminAddress)) {
+    throw new Error("New admin address must be a valid Stellar public key (G…).");
+  }
+
+  const contract = new StellarSdk.Contract(contractId);
+  const sourceAccount = await sorobanRpc.getAccount(publicKey);
+  const transaction = buildContractTx(
+    contract,
+    "propose_admin",
+    [
+      StellarSdk.nativeToScVal(publicKey, { type: "address" }),
+      StellarSdk.nativeToScVal(newAdminAddress, { type: "address" }),
+    ],
+    sourceAccount
+  );
+
+  const prepared = await sorobanRpc.prepareTransaction(transaction);
+  const signedTx = await signWithFreighter(prepared.toXDR(), publicKey);
+  const sendResult = await sorobanRpc.sendTransaction(signedTx);
+
+  if (sendResult.status === "ERROR") {
+    throw new Error(
+      `Propose admin rejected by the network. Tx hash: ${sendResult.hash}`
+    );
+  }
+
+  // Poll for confirmation
+  for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
+    const status = await sorobanRpc.getTransaction(sendResult.hash);
+    if (status.status === "SUCCESS") {
+      return { hash: sendResult.hash, confirmed: true };
+    }
+    if (status.status === "FAILED") {
+      throw new Error(
+        `Propose admin failed on-chain. Tx hash: ${sendResult.hash}`
+      );
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+
+  return { hash: sendResult.hash, confirmed: false };
+}
+
+/**
+ * Accept a pending admin transfer for the Kitewell contract.
+ * Only the pending admin can call this. On success, the caller becomes the
+ * live admin and the pending slot clears.
+ *
+ * @param {string} publicKey - Pending admin's public key (must match pending)
+ * @param {string} contractId - The contract's C… address
+ * @returns {Promise<{ hash: string, confirmed: boolean }>}
+ */
+export async function acceptAdminWithFreighter(publicKey, contractId) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Pending admin address is invalid.");
+  }
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error(
+      "Contract ID must be a valid Soroban contract strkey (C…)."
+    );
+  }
+
+  const contract = new StellarSdk.Contract(contractId);
+  const sourceAccount = await sorobanRpc.getAccount(publicKey);
+  const transaction = buildContractTx(
+    contract,
+    "accept_admin",
+    [StellarSdk.nativeToScVal(publicKey, { type: "address" })],
+    sourceAccount
+  );
+
+  const prepared = await sorobanRpc.prepareTransaction(transaction);
+  const signedTx = await signWithFreighter(prepared.toXDR(), publicKey);
+  const sendResult = await sorobanRpc.sendTransaction(signedTx);
+
+  if (sendResult.status === "ERROR") {
+    throw new Error(
+      `Accept admin rejected by the network. Tx hash: ${sendResult.hash}`
+    );
+  }
+
+  // Poll for confirmation
+  for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
+    const status = await sorobanRpc.getTransaction(sendResult.hash);
+    if (status.status === "SUCCESS") {
+      return { hash: sendResult.hash, confirmed: true };
+    }
+    if (status.status === "FAILED") {
+      throw new Error(
+        `Accept admin failed on-chain. Tx hash: ${sendResult.hash}`
+      );
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+
+  return { hash: sendResult.hash, confirmed: false };
+}
+
+/**
  * Check in a builder: builds + simulates a Soroban `register(caller, name)`
  * invoke, lets Freighter sign it, then submits via Soroban RPC and waits for
  * on-chain confirmation.

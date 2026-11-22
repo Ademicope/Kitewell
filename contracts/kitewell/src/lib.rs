@@ -114,6 +114,11 @@ impl Kitewell {
         env.storage().instance().get(&ADMIN)
     }
 
+    /// Read the pending admin, if one has been proposed.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&PENDING_ADMIN)
+    }
+
     /// Admin-only pause / unpause toggle.
     ///
     /// On success it publishes the `paused` event: topic `("paused",)`, data
