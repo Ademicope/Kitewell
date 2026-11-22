@@ -46,6 +46,7 @@ const TABS = [
   "History",
   "Inspect",
   "Lab",
+  "Issue",
 ];
 const PATH_MODE_FIELDS = {
   strictSend: {
@@ -98,6 +99,9 @@ export default function App() {
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [pathForm, setPathForm] = useState({
     mode: "strictSend",
+  });
+  const [issueForm, setIssueForm] = useState({ code: "", limit: "" });
+  const [connectedAccount, setConnectedAccount] = useState(null);
     destination: "",
     amount: "",
     bound: "",
@@ -304,6 +308,49 @@ export default function App() {
     } catch (err) {
       trackFailedSubmit("changeTrust", err);
       showToast(err.message || "Change trust failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleIssue = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!issueForm.code) {
+      return showToast("Asset code is required.", "error");
+    }
+    let code;
+    try {
+      code = validateAssetCode(issueForm.code);
+    } catch (err) {
+      return showToast(err.message, "error");
+    }
+    setLoading("issue");
+    try {
+      if (publicKey === connectedAccount) {
+        // Issuer: show trustline request for holder
+        showToast(
+          `Asset ${code} issued. Holder must submit changeTrust(${connectedAccount}, ${code}) to trust.`,
+          "success"
+        );
+      } else {
+        // Holder: submit changeTrust for the connected account (issuer)
+        await changeTrustWithFreighter(
+          publicKey,
+          code,
+          connectedAccount,
+          issueForm.limit || "1000000"
+        );
+        const next = await getAccountBalances(publicKey);
+        setBalances(next);
+        showToast(`Trustline for ${code} submitted.`);
+      }
+      setIssueForm({ code: "", limit: "" });
+      setIssueSuccess(true);
+    } catch (err) {
+      setIssueError(err.message || "Issue failed.");
+      trackFailedSubmit("issue", err);
+      showToast(err.message || "Issue failed.", "error");
     } finally {
       setLoading("");
     }
@@ -1638,6 +1685,84 @@ export default function App() {
                   Download failed JSON
                 </button>
               </div>
+            </div>
+          )}
+
+          {activeTab === "Issue" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Issue Credit Asset</h2>
+                <p className="muted">
+                  Issue a new credit asset from your connected account.
+                </p>
+              </div>
+              {publicKey && connectedAccount ? (
+                <form className="form" onSubmit={handleIssue}>
+                  <label className="label" htmlFor="issue-asset-code">
+                    Asset code
+                  </label>
+                  <input
+                    id="issue-asset-code"
+                    className="input"
+                    value={issueForm.code}
+                    onChange={(e) => setIssueForm({ ...issueForm, code: e.target.value })}
+                    placeholder="e.g. MYASSET"
+                    maxLength={12}
+                    required
+                  />
+                  <label className="label" htmlFor="issue-limit">
+                    Limit
+                  </label>
+                  <input
+                    id="issue-limit"
+                    className="input"
+                    type="number"
+                    placeholder="e.g. 1000000"
+                    value={issueForm.limit}
+                    onChange={(e) => setIssueForm({ ...issueForm, limit: e.target.value })}
+                    required
+                  />
+                  <hr />
+                  <h3>Account Role</h3>
+                  <p className="muted">
+                    Connected account: {connectedAccount}
+                  </p>
+                  {publicKey === connectedAccount ? (
+                    <div>
+                      <p className="muted">
+                        You are the issuer. The asset will be issued to your account.
+                      </p>
+                      <p className="muted">
+                        Submit a trustline request for holders to accept.
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="muted">
+                      Holder account: connected account will need to trust this asset.
+                    </p>
+                  )}
+                  <hr />
+                  <button className="btn btn--primary" type="submit">
+                    Execute
+                  </button>
+                </form>
+                {issueError && (
+                  <div className="info-box info-box--warning" role="alert">
+                    <span className="eyebrow">Issue</span>
+                    <p className="muted">{issueError}</p>
+                  </div>
+                )}
+                {issueSuccess && (
+                  <div className="info-box info-box--success" role="alert">
+                    <span className="eyebrow">Success</span>
+                    <p className="muted">Asset issued successfully</p>
+                  </div>
+                )}
+              ) : (
+                <p className="muted">
+                  Connect Freighter and ensure the connected account is different from your issuer account.
+                </p>
+              )}
             </div>
           )}
 
