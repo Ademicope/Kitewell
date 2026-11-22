@@ -27,7 +27,7 @@ export const SOROBAN_RPC_URL = "https://soroban-testnet.stellar.org";
 const sorobanRpc = new StellarSdk.rpc.Server(SOROBAN_RPC_URL);
 
 export const SOROBAN_RPC_HEADERS = {
-  accept: "application/json,"
+  accept: "application/json",
 };
 
 /**
@@ -46,14 +46,13 @@ export async function checkSorobanRpcHealth(timeoutMs = 3000) {
   // tab, so every failing case here is reported back to the Lab tab.
   const base = SOROBAN_RPC_URL.replace(/\/$/, "");
 
-  let healthResult = null;
-  let healthStatus = null;
+  let healthStatus;
   let healthError = null;
 
   try {
     const healthRes = await fetch(
       `${base}/rpc/method?request={"method":"getHealth"}`,
-      { headers: SOROBAN_RPC_HEADERS }
+      { headers: SOROBAN_RPC_HEADERS, signal: AbortSignal.timeout(timeoutMs) }
     );
 
     if (!healthRes.ok) {
@@ -61,7 +60,7 @@ export async function checkSorobanRpcHealth(timeoutMs = 3000) {
       throw new Error(`Soroban RPC returned HTTP ${healthRes.status}`);
     }
 
-    healthResult = await healthRes.json();
+    const healthResult = await healthRes.json();
     healthStatus = healthResult.result?.body?.status;
   } catch (error) {
     healthStatus = null;
@@ -84,7 +83,7 @@ export async function checkSorobanRpcHealth(timeoutMs = 3000) {
     try {
       const ledgerRes = await fetch(
         `${base}/rpc/method?request={"method":"getLatestLedger"}`,
-        { headers: SOROBAN_RPC_HEADERS }
+        { headers: SOROBAN_RPC_HEADERS, signal: AbortSignal.timeout(timeoutMs) }
       );
 
       if (ledgerRes.ok) {

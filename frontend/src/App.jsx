@@ -7,6 +7,7 @@ import {
   changeTrustWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
+  checkSorobanRpcHealth,
 } from "./freighter";
 import {
   fundWithFriendbot,
@@ -177,7 +178,6 @@ export default function App() {
       setAccountDetails(null);
       showToast(`Switched to ${next.label}. Refresh to load balances.`, "info");
       if (publicKey) refreshBalances();
-      checkRpc();
     } catch (e) {
       showToast(e.message || "Could not switch network.", "error");
     }
@@ -408,12 +408,11 @@ export default function App() {
     }
   }, []);
 
+  // Recheck whenever the user switches networks: the new Horizon/Soroban RPC
+  // may be up while the old one is down.
   useEffect(() => {
     checkRpc();
-    // Recheck whenever the user switches networks: the new Horizon/Soroban RPC
-    // may be up while the old one is down.
-    checkRpc();
-  }, [checkRpc, getActiveNetwork().id]);
+  }, [checkRpc, networkId]);
 
   const refreshLabState = useCallback(async () => {
     const contractId = labInfo?.network?.contract?.kitewell;
@@ -426,11 +425,11 @@ export default function App() {
     // The Soroban RPC must be reachable before the Lab tab simulates or
     // deploys anything. The backend's Horizon requests are intentionally
     // unaffected: classic payments only need the Horizon server, not the RPC.
-    if (!sorobanRpcReady) {
+    if (!rpcHealth.ok) {
       setLabState(null);
       setLabStateError(
-        sorobanRpcLastError ||
-          `Soroban RPC unreachable (${sorobanRpcDescription}). ` +
+        rpcHealth.error ||
+          `Soroban RPC unreachable (${rpcHealth.description}). ` +
           "Switch networks and refresh to recheck."
       );
       return;
@@ -449,11 +448,17 @@ export default function App() {
     } finally {
       setLoading("");
     }
-  }, [labInfo, publicKey, sorobanRpcLatestLedger, sorobanRpcReady, sorobanRpcLastError]);
+  }, [labInfo, publicKey, rpcHealth]);
 
   const handleRegister = async (e) => {
     e.preventDefault();
     if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!rpcHealth.ok) {
+      return showToast(
+        "Soroban RPC unreachable — the contract cannot be invoked until it recovers.",
+        "error"
+      );
+    }
     const contractId = labInfo?.network?.contract?.kitewell;
     if (!contractId) {
       return showToast(
@@ -1252,7 +1257,7 @@ export default function App() {
                       className="btn btn--secondary"
                       type="button"
                       onClick={refreshLabState}
-                      disabled={loading === "labstate"}
+                      disabled={loading === "labstate" || !rpcHealth.ok}
                     >
                       {loading === "labstate" ? (
                         <>
@@ -1287,6 +1292,12 @@ export default function App() {
                     <p className="muted">
                       Reads lab_name, builder_count, and get_builder via Soroban RPC.
                     </p>
+                  )}
+                  {labStateError && (
+                    <div className="info-box info-box--warning">
+                      <span className="eyebrow">Contract state</span>
+                      <p className="muted">{labStateError}</p>
+                    </div>
                   )}
                   {labInfo && (
                     <div className="info-box">
@@ -1349,7 +1360,7 @@ export default function App() {
                     <button
                       className="btn btn--primary"
                       type="submit"
-                      disabled={loading === "register" || requireWallet}
+                      disabled={loading === "register" || requireWallet || !rpcHealth.ok}
                     >
                       {loading === "register" ? (
                         <>
