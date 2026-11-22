@@ -125,6 +125,15 @@ export default function App() {
   const [failedSubmits, setFailedSubmits] = useState([]);
   const failedSubmitLogRef = useRef(createFailedSubmitLog());
 
+  // Lab tab signers/weights/thresholds state
+  const [signers, setSigners] = useState([]);
+  const [signerWeights, setSignerWeights] = useState([]);
+  const [lowThreshold, setLowThreshold] = useState(0);
+  const [medThreshold, setMedThreshold] = useState(0);
+  const [highThreshold, setHighThreshold] = useState(0);
+  const [editingSigner, setEditingSigner] = useState(null);
+  const [editingThreshold, setEditingThreshold] = useState(null);
+
   const showToast = (message, type = "success", explorerUrl = null) => {
     setToast({ message, type, explorerUrl });
     setTimeout(() => setToast(null), 4200);
@@ -194,6 +203,15 @@ export default function App() {
       cancelled = true;
     };
   }, [balances]);
+
+  // Keep signerWeights in sync with signers
+  useEffect(() => {
+    if (signers.length !== signerWeights.length) {
+      // Initialize or trim weights to match signers count
+      const newWeights = signers.map(() => 0);
+      setSignerWeights(newWeights);
+    }
+  }, [signers.length, signerWeights.length]);
 
   const refreshBalances = useCallback(async () => {
     if (!publicKey) return;
@@ -623,6 +641,90 @@ export default function App() {
     } catch (err) {
       trackFailedSubmit("register", err);
       showToast(err.message || "Contract invoke failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  // Handle signer weight change
+  const handleSignerWeightChange = (index, weight) => {
+    const newWeights = [...signerWeights];
+    newWeights[index] = weight;
+    setSignerWeights(newWeights);
+  };
+
+  // Handle remove signer
+  const handleRemoveSigner = (index) => {
+    // Check if removing this signer would lock out the high threshold
+    const currentSignerWeight = signerWeights[index] ?? 0;
+    const remainingWeight = signerWeights.filter((_, i) => i !== index).reduce((sum, w) => sum + (w ?? 0), 0);
+    if (remainingWeight < highThreshold && signers.length > 1) {
+      if (!window.confirm(
+        `Removing this signer would leave ${remainingWeight} total weight, which is below the high threshold of ${highThreshold}.\n\nAre you sure you want to remove this signer? This may lock you out of high-threshold operations.`
+      )) {
+        return;
+      }
+    }
+    setSigners(signers.filter((_, i) => i !== index));
+    setSignerWeights(signerWeights.filter((_, i) => i !== index));
+  };
+
+  // Handle add signer
+  const handleAddSigner = (newSignerKey) => {
+    if (!newSignerKey) return;
+    const trimmed = newSignerKey.trim();
+    if (!trimmed) return;
+    if (!StellarSdk.StrKey.isValidEd25519PublicKey(trimmed)) {
+      return showToast("Invalid signer public key format.", "error");
+    }
+    // Check if signer already exists
+    if (signers.includes(trimmed)) {
+      return showToast("This signer is already added.", "error");
+    }
+    setSigners([...signers, trimmed]);
+    setSignerWeights([...signerWeights, 0]);
+    showToast("Signer added with weight 0.");
+  };
+
+  // Handle setOptions transaction for signer weights and thresholds
+  const handleSetOptions = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+
+    // Build the setOptions operation with the edited values
+    const operations = [];
+
+    // Build the setOptions params
+    const setOptionsParams = {
+      lowThreshold: lowThreshold,
+      medThreshold: medThreshold,
+      highThreshold: highThreshold,
+      signer: signers.map((signer, index) => ({
+        address: signer,
+        weight: signerWeights[index] ?? 0,
+      })),
+    };
+
+    // Build the setOptions transaction
+    try {
+      setLoading("setoptions");
+      const sourceAccount = await getServer().loadAccount(publicKey);
+      const txBuilder = new StellarSdk.TransactionBuilder(sourceAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: currentPassphrase(),
+      });
+      txBuilder.setOptions(setOptionsParams);
+      const txXDR = txBuilder.setTimeout(180).build().toXDR();
+
+      // Show the envelope before Freighter opens
+      setUnsignedEnvelope(txXDR);
+      showToast(
+        "Review the unsigned setOptions envelope, then sign in Freighter.",
+        "info"
+      );
+    } catch (err) {
+      trackFailedSubmit("setoptions", err);
+      showToast(err.message || "Failed to build setOptions transaction.", "error");
     } finally {
       setLoading("");
     }
@@ -1617,10 +1719,183 @@ export default function App() {
                   )}
                 </>
               )}
+              {/* Signers, weights, and thresholds management */}
+              <div className="section" id="signers-thresholds-section">
+                <div className="section__row">
+                  <h2>Signer weights & thresholds</h2>
+                  <p className="muted">
+                    Manage account thresholds and signer weights. Weights are 0–255.
+                    A weight of 0 removes a signer.
+                  </p>
+                </div>
+                {accountDetails ? (
+                  <div className="metadata-grid">
+                    <div>
+                      <span className="metadata-label">Current low threshold</span>
+                      <span className="metadata-value">{accountDetails.thresholds?.low ?? 0}</span>
+                    </div>
+                    <div>
+                      <span className="metadata-label">Current medium threshold</span>
+                      <span className="metadata-value">{accountDetails.thresholds?.medium ?? 0}</span>
+                    </div>
+                    <div>
+                      <span className="metadata-label">Current high threshold</span>
+                      <span className="metadata-value">{accountDetails.thresholds?.high ?? 0}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="muted">Connect Freighter to view current thresholds.</p>
+                )}
+                {!accountDetails && !publicKey && (
+                  <p className="muted">Connect Freighter to manage signers and thresholds.</p>
+                )}
+                {accountDetails && (
+                  <form className="form" onSubmit={handleSetOptions}>
+                    <div className="metadata-grid">
+                      <div>
+                        <span className="metadata-label">Low threshold</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="255"
+                          step="1"
+                          value={lowThreshold}
+                          onChange={(e) => setLowThreshold(Number(e.target.value))}
+                        />
+                      </div>
+                      <div>
+                        <span className="metadata-label">Medium threshold</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="255"
+                          step="1"
+                          value={medThreshold}
+                          onChange={(e) => setMedThreshold(Number(e.target.value))}
+                        />
+                      </div>
+                      <div>
+                        <span className="metadata-label">High threshold</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="255"
+                          step="1"
+                          value={highThreshold}
+                          onChange={(e) => setHighThreshold(Number(e.target.value))}
+                        />
+                      </div>
+                    </div>
+                    <div className="section__row">
+                      <span className="metadata-label">Signers</span>
+                      <span className="metadata-value">{signers.length}</span>
+                    </div>
+                    {signers.length > 0 && (
+                      <ul className="signer-list">
+                        {signers.map((signer, index) => (
+                          <li key={signer} className="signer-row">
+                            <span className="signer-address">{signer}</span>
+                            <span className="signer-weight">
+                              <input
+                                type="number"
+                                min="0"
+                                max="255"
+                                step="1"
+                                value={signerWeights[index] ?? 0}
+                                onChange={(e) => handleSignerWeightChange(index, Number(e.target.value))}
+                              />
+                            </span>
+                            <button
+                              className="btn btn--secondary btn--sm"
+                              type="button"
+                              onClick={() => handleRemoveSigner(index)}
+                            >
+                              Remove
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {signers.length < 4 && (
+                      <div className="section__row">
+                        <span className="metadata-label">Add signer</span>
+                        <input
+                          type="text"
+                          placeholder="Signer public key (G...)"
+                          onChange={(e) => handleAddSigner(e.target.value)}
+                        />
+                        <button
+                          className="btn btn--primary"
+                          type="button"
+                          onClick={() => handleAddSigner(signerInput)}
+                          disabled={!signerInput}
+                        >
+                          Add
+                        </button>
+                      </div>
+                    )}
+                    <div className="section__row">
+                      <button
+        type="submit"
+        disabled={loading === "setoptions" || requireWallet}
+      >
+        {loading === "setoptions" ? (
+          <>
+            <Spinner /> Signing in Freighter…
+          </>
+        ) : (
+          "Submit setOptions"
+        )}
+      </button>
+                    </div>
+                  </form>
+                )}
+                {accountDetails && (
+                  <div className="warning-box">
+                    <span className="eyebrow">Warning</span>
+                    <p className="muted">
+                      {mediumThreshold > (signers.reduce((sum, w) => sum + (w.weight ?? 0), 0) || 0)
+                        ? "Medium threshold exceeds total signer weights!"
+                        : ""}
+                    </p>
+                  </div>
+                )}
+              </div>
               {!labInfo && !labError && (
                 <p className="muted">Open this tab to probe the backend.</p>
               )}
               <div className="info-box">
+              <div className="info-box">
+                <span className="eyebrow">Failed submits</span>
+                <p className="muted">
+                  {failedSubmits.length === 0
+                    ? "No failed submits this session yet."
+                    : `${failedSubmits.length} failed submission${
+                        failedSubmits.length === 1 ? "" : "s"
+                      } this session. Cleared on disconnect or reload — not stored in localStorage.`}
+                </p>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={handleDownloadFailedSubmits}
+                  disabled={failedSubmits.length === 0}
+                >
+                  Download failed JSON
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "History" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Payment history</h2>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={handleHistory}
+                  disabled={loading === "history" || requireWallet}
+
                 <span className="eyebrow">Failed submits</span>
                 <p className="muted">
                   {failedSubmits.length === 0
