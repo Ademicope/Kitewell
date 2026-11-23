@@ -23,7 +23,11 @@ import {
   createFailedSubmitLog,
   downloadFailedSubmitLog,
 } from "./failedSubmitLog";
-import { shortenAddress } from "./addressFormat";
+import {
+  shortenAddress,
+  buildMuxedAddress,
+  splitMuxedAddress,
+} from "./addressFormat";
 import {
   fundWithFriendbot,
   getAccountBalances,
@@ -77,6 +81,7 @@ const TABS = [
   "Decode",
   "Issuer",
   "Web auth",
+  "Muxed",
   "Lab",
 ];
 const PENDING_REFRESH_MS = 8000;
@@ -155,6 +160,11 @@ export default function App() {
   const [labStateError, setLabStateError] = useState(null);
   const [registerForm, setRegisterForm] = useState({ name: "" });
   const [lastRegisterTx, setLastRegisterTx] = useState(null);
+  const [muxedBuildForm, setMuxedBuildForm] = useState({ gAddress: "", id: "" });
+  const [muxedBuildResult, setMuxedBuildResult] = useState(null);
+  const [muxedSplitForm, setMuxedSplitForm] = useState({ mAddress: "" });
+  const [muxedSplitResult, setMuxedSplitResult] = useState(null);
+  const [muxedError, setMuxedError] = useState(null);
   const [inspectForm, setInspectForm] = useState({ xdr: "" });
   const [inspectResult, setInspectResult] = useState(null);
   const [inspectError, setInspectError] = useState(null);
@@ -267,6 +277,15 @@ export default function App() {
     setUnsignedEnvelope(null);
   };
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
+  const muxedSendBase = (() => {
+    const value = sendForm.destination.trim();
+    if (!value) return null;
+    try {
+      return splitMuxedAddress(value).gAddress;
+    } catch {
+      return null;
+    }
+  })();
   const configuredContractId = labInfo?.network?.contract?.kitewell;
 
   useEffect(() => {
@@ -1247,6 +1266,36 @@ export default function App() {
     } catch (error) {
       setDecodedEnvelope(null);
       setDecodeError(error.message || "Could not decode this envelope.");
+    }
+  };
+
+  const handleBuildMuxed = (event) => {
+    event.preventDefault();
+    setMuxedError(null);
+    setMuxedBuildResult(null);
+    try {
+      setMuxedBuildResult(
+        buildMuxedAddress(
+          muxedBuildForm.gAddress.trim(),
+          muxedBuildForm.id.trim()
+        )
+      );
+    } catch (err) {
+      setMuxedError(err.message || "Could not build the muxed address.");
+    }
+  };
+
+  const handleSplitMuxed = (event) => {
+    event.preventDefault();
+    setMuxedError(null);
+    setMuxedSplitResult(null);
+    try {
+      const { gAddress, id } = splitMuxedAddress(
+        muxedSplitForm.mAddress.trim()
+      );
+      setMuxedSplitResult({ gAddress, id: id.toString() });
+    } catch (err) {
+      setMuxedError(err.message || "Could not split the muxed address.");
     }
   };
 
