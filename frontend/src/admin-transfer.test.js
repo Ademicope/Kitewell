@@ -121,6 +121,39 @@ describe("readAdminState", () => {
     expect(result.pendingAdmin).toBe(null);
   });
 
+  it("handles missing get_pending_admin method gracefully", async () => {
+    mockSimulateTransaction.mockImplementation(async (tx) => {
+      const method = tx.operations[0].func.value().functionName();
+      
+      if (method === "get_admin") {
+        // Return Some(admin)
+        return {
+          error: null,
+          result: {
+            retval: StellarSdk.xdr.ScVal.scvVec([
+              StellarSdk.nativeToScVal(TEST_ADMIN, { type: "address" }),
+            ]),
+          },
+        };
+      }
+      
+      if (method === "get_pending_admin") {
+        // Method doesn't exist on old contract
+        return {
+          error: "get_pending_admin() simulation failed: unknown method",
+        };
+      }
+      
+      return { error: "Unknown method" };
+    });
+
+    const result = await readAdminState(TEST_CONTRACT_ID);
+
+    // Should still return admin, with pendingAdmin as null
+    expect(result.admin).toBe(TEST_ADMIN);
+    expect(result.pendingAdmin).toBe(null);
+  });
+
   it("rejects invalid contract id", async () => {
     await expect(
       readAdminState("INVALID_CONTRACT")

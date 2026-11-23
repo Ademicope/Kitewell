@@ -116,10 +116,17 @@ export async function readAdminState(contractId) {
     return sim.result?.retval ?? null;
   };
 
-  const [admin, pendingAdmin] = await Promise.all([
-    simulate("get_admin").then(scOptionToNative),
-    simulate("get_pending_admin").then(scOptionToNative),
-  ]);
+  // Always read admin
+  const admin = await simulate("get_admin").then(scOptionToNative);
+  
+  // Try to read pending admin, but it may not exist on older contracts
+  let pendingAdmin = null;
+  try {
+    pendingAdmin = await simulate("get_pending_admin").then(scOptionToNative);
+  } catch (error) {
+    // get_pending_admin doesn't exist on this contract version, that's ok
+    // (it's new in PR #553 and may not be deployed yet)
+  }
 
   return { admin, pendingAdmin };
 }

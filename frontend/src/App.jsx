@@ -432,12 +432,20 @@ export default function App() {
     setLoading("labstate");
     setLabStateError(null);
     try {
-      const [state, admin] = await Promise.all([
-        readKitewellState(contractId, publicKey),
-        readAdminState(contractId),
-      ]);
+      // Always read builder state
+      const state = await readKitewellState(contractId, publicKey);
       setLabState(state);
-      setAdminState(admin);
+      
+      // Try to read admin state, but don't fail if the contract doesn't have
+      // get_pending_admin yet (it's new in this PR and may not be deployed)
+      try {
+        const admin = await readAdminState(contractId);
+        setAdminState(admin);
+      } catch (adminError) {
+        // Admin read failed (probably because get_pending_admin doesn't exist
+        // on the deployed contract yet), but keep the builder state
+        setAdminState(null);
+      }
     } catch (e) {
       setLabState(null);
       setLabStateError(
