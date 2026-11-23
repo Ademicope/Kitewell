@@ -137,7 +137,7 @@ export async function readAdminState(contractId) {
   let pendingAdmin = null;
   try {
     pendingAdmin = await simulate("get_pending_admin").then(scOptionToNative);
-  } catch (error) {
+  } catch {
     // get_pending_admin doesn't exist on this contract version, that's ok
     // (it's new in PR #553 and may not be deployed yet)
   }

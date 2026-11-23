@@ -103,9 +103,7 @@ describe("readAdminState", () => {
   });
 
   it("handles null admin when not initialized", async () => {
-    mockSimulateTransaction.mockImplementation(async (tx) => {
-      const method = tx.operations[0].func.value().functionName();
-      
+    mockSimulateTransaction.mockImplementation(async () => {
       // Return None as empty vector
       return {
         error: null,

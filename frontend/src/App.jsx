@@ -593,7 +593,7 @@ export default function App() {
       try {
         const admin = await readAdminState(contractId);
         setAdminState(admin);
-      } catch (adminError) {
+      } catch {
         // Admin read failed (probably because get_pending_admin doesn't exist
         // on the deployed contract yet), but keep the builder state
         setAdminState(null);
