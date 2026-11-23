@@ -17,9 +17,11 @@ import {
 import { shortenAddress } from "./addressFormat";
 import {
   fundWithFriendbot,
+  buildAsset,
   getAccountBalances,
   getAccountDetails,
   getLiquidityPool,
+  getOrderBook,
   getTransactions,
   explorerAccountUrl,
   explorerTxUrl,
@@ -43,6 +45,7 @@ const TABS = [
   "Assets",
   "Send",
   "Path",
+  "Offer",
   "History",
   "Inspect",
   "Lab",
@@ -110,6 +113,17 @@ export default function App() {
     path: "",
   });
   const [pathResult, setPathResult] = useState(null);
+  const [offerForm, setOfferForm] = useState({
+    sellingType: "native",
+    sellingCode: "",
+    sellingIssuer: "",
+    buyingType: "credit",
+    buyingCode: "",
+    buyingIssuer: "",
+    price: "",
+  });
+  const [orderBook, setOrderBook] = useState(null);
+  const [orderBookError, setOrderBookError] = useState(null);
   const [unsignedEnvelope, setUnsignedEnvelope] = useState(null);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
@@ -153,12 +167,22 @@ export default function App() {
   const friendbotAvailable = isFriendbotAvailable();
   const pathModeField = PATH_MODE_FIELDS[pathForm.mode];
   const updatePathForm = (changes) => setPathForm((prev) => ({ ...prev, ...changes }));
+  const updateOfferForm = (changes) => setOfferForm((prev) => ({ ...prev, ...changes }));
   // Any edit changes the operation list, so the previewed envelope is stale.
   const updateSendForm = (changes) => {
     setSendForm((prev) => ({ ...prev, ...changes }));
     setUnsignedEnvelope(null);
   };
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
+
+  const getOfferAsset = (side) => {
+    const type = offerForm[`${side}Type`];
+    return buildAsset({
+      isNative: type === "native",
+      code: offerForm[`${side}Code`],
+      issuer: offerForm[`${side}Issuer`],
+    });
+  };
 
   useEffect(() => {
     checkFreighterInstalled().then(setFreighterInstalled);
@@ -517,6 +541,30 @@ export default function App() {
     } finally {
       setLoading("");
     }
+  };
+
+  const handleOrderBook = async (e) => {
+    e.preventDefault();
+    setLoading("order-book");
+    setOrderBookError(null);
+    setOrderBook(null);
+    try {
+      const book = await getOrderBook(getOfferAsset("selling"), getOfferAsset("buying"));
+      setOrderBook(book);
+    } catch (error) {
+      setOrderBookError(
+        error.message === "Selling and buying assets must be different."
+          ? error.message
+          : "The order book could not be read. Try again in a moment."
+      );
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const selectBookPrice = (row) => {
+    const price = row.price ?? (Number(row.priceR?.n) / Number(row.priceR?.d)).toString();
+    updateOfferForm({ price });
   };
 
   const handleHistory = async () => {
@@ -1425,6 +1473,68 @@ export default function App() {
                   </a>
                 </div>
               )}
+            </div>
+          )}
+
+          {activeTab === "Offer" && (
+            <div className="section">
+              <h2>Price an offer</h2>
+              <p className="muted">
+                Read the live order book before pricing an offer. Selecting a row only fills the
+                price; nothing is signed or submitted.
+              </p>
+              <form onSubmit={handleOrderBook} className="form">
+                <label className="label" htmlFor="offer-selling-type">Selling asset</label>
+                <select id="offer-selling-type" className="input" value={offerForm.sellingType}
+                  onChange={(e) => updateOfferForm({ sellingType: e.target.value })}>
+                  <option value="native">XLM (native)</option>
+                  <option value="credit">Credit asset</option>
+                </select>
+                {offerForm.sellingType === "credit" && <>
+                  <input className="input" placeholder="Selling asset code, e.g. USDC" maxLength={12}
+                    value={offerForm.sellingCode} onChange={(e) => updateOfferForm({ sellingCode: e.target.value })} required />
+                  <input className="input" placeholder="Selling asset issuer G…"
+                    value={offerForm.sellingIssuer} onChange={(e) => updateOfferForm({ sellingIssuer: e.target.value })} required />
+                </>}
+                <label className="label" htmlFor="offer-buying-type">Buying asset</label>
+                <select id="offer-buying-type" className="input" value={offerForm.buyingType}
+                  onChange={(e) => updateOfferForm({ buyingType: e.target.value })}>
+                  <option value="native">XLM (native)</option>
+                  <option value="credit">Credit asset</option>
+                </select>
+                {offerForm.buyingType === "credit" && <>
+                  <input className="input" placeholder="Buying asset code, e.g. USDC" maxLength={12}
+                    value={offerForm.buyingCode} onChange={(e) => updateOfferForm({ buyingCode: e.target.value })} required />
+                  <input className="input" placeholder="Buying asset issuer G…"
+                    value={offerForm.buyingIssuer} onChange={(e) => updateOfferForm({ buyingIssuer: e.target.value })} required />
+                </>}
+                <label className="label" htmlFor="offer-price">Offer price (buying per selling)</label>
+                <input id="offer-price" className="input" type="number" min="0" step="any"
+                  value={offerForm.price} onChange={(e) => updateOfferForm({ price: e.target.value })}
+                  placeholder="Choose a bid or ask below" />
+                <button className="btn btn--primary" type="submit" disabled={loading === "order-book"}>
+                  {loading === "order-book" ? <><Spinner /> Loading book…</> : "Load order book"}
+                </button>
+              </form>
+              {orderBookError && <div className="info-box info-box--warning" role="alert">
+                <span className="eyebrow">Order book</span><p className="muted">{orderBookError}</p>
+              </div>}
+              {orderBook && <div className="order-book" aria-label="Order book">
+                {[['Bids', orderBook.bids], ['Asks', orderBook.asks]].map(([label, rows]) => (
+                  <div key={label} className="order-book__side">
+                    <h3 className="subhead">{label}</h3>
+                    {rows.length === 0 ? <p className="muted">No {label.toLowerCase()} available.</p> : (
+                      <div className="order-book__rows">
+                        {rows.map((row, index) => <button key={`${label}-${index}`} type="button"
+                          className="order-book__row" onClick={() => selectBookPrice(row)}>
+                          <span>{row.price}</span><span>{row.amount}</span>
+                        </button>)}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div className="order-book__header"><span>Price</span><span>Amount</span></div>
+              </div>}
             </div>
           )}
 

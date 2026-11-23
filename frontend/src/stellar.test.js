@@ -14,9 +14,10 @@ vi.mock("./api", () => ({
   fetchPaymentsViaApi: vi.fn(),
 }));
 
-const { loadAccountMock, paymentsCallMock } = vi.hoisted(() => ({
+const { loadAccountMock, paymentsCallMock, orderBookCallMock } = vi.hoisted(() => ({
   loadAccountMock: vi.fn(),
   paymentsCallMock: vi.fn(),
+  orderBookCallMock: vi.fn(),
 }));
 
 vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
@@ -35,6 +36,9 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
               }),
             }),
           }),
+          orderbook: () => ({
+            limit: () => ({ call: orderBookCallMock }),
+          }),
         };
       }),
     },
@@ -52,6 +56,7 @@ const {
   getAccountDetails,
   getBalance,
   getTransactions,
+  getOrderBook,
   parsePathAssets,
 } = await import("./stellar");
 
@@ -82,6 +87,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   loadAccountMock.mockReset();
   paymentsCallMock.mockReset();
+  orderBookCallMock.mockReset();
 });
 
 afterEach(() => {
@@ -138,6 +144,36 @@ describe("asset + path helpers", () => {
 
   it("rejects a credit hop without an issuer", () => {
     expect(() => parsePathAssets("USDC")).toThrow(/needs an issuer/);
+  });
+});
+
+describe("getOrderBook", () => {
+  const issuer = StellarSdk.Keypair.random().publicKey();
+
+  it("limits and maps fixture bids and asks", async () => {
+    orderBookCallMock.mockResolvedValue({
+      bids: Array.from({ length: 12 }, (_, index) => ({ amount: `${index + 1}`, price: `${index + 2}` })),
+      asks: [{ amount: "4", price: "1.25" }],
+    });
+
+    await expect(getOrderBook(StellarSdk.Asset.native(), new StellarSdk.Asset("USDC", issuer)))
+      .resolves.toEqual({
+        bids: Array.from({ length: 10 }, (_, index) => ({ amount: `${index + 1}`, price: `${index + 2}`, priceR: undefined })),
+        asks: [{ amount: "4", price: "1.25", priceR: undefined }],
+      });
+    expect(orderBookCallMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a same-asset pair before Horizon", async () => {
+    await expect(getOrderBook(StellarSdk.Asset.native(), StellarSdk.Asset.native()))
+      .rejects.toThrow("Selling and buying assets must be different.");
+    expect(orderBookCallMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves an empty book as empty arrays", async () => {
+    orderBookCallMock.mockResolvedValue({ bids: [], asks: [] });
+    await expect(getOrderBook(StellarSdk.Asset.native(), new StellarSdk.Asset("USDC", issuer)))
+      .resolves.toEqual({ bids: [], asks: [] });
   });
 });
 

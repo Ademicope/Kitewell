@@ -186,6 +186,31 @@ export async function getLiquidityPool(poolId) {
   return getServer().liquidityPools().liquidityPoolId(poolId).call();
 }
 
+function assetIdentity(asset) {
+  return asset.isNative() ? "native" : `${asset.getCode()}:${asset.getIssuer()}`;
+}
+
+function mapOrderBookRows(rows = []) {
+  return rows.slice(0, 10).map((row) => ({
+    amount: row.amount,
+    price: row.price,
+    priceR: row.price_r,
+  }));
+}
+
+/** Load the ten best bids and asks for a selling/buying asset pair. */
+export async function getOrderBook(selling, buying) {
+  if (assetIdentity(selling) === assetIdentity(buying)) {
+    throw new Error("Selling and buying assets must be different.");
+  }
+
+  const book = await getServer().orderbook(selling, buying).limit(10).call();
+  return {
+    bids: mapOrderBookRows(book.bids),
+    asks: mapOrderBookRows(book.asks),
+  };
+}
+
 /**
  * Load one page of payment history.
  *
