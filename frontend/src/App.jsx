@@ -2,21 +2,29 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import {
   checkFreighterInstalled,
   connectFreighterWallet,
-  sendPaymentWithFreighter,
+  buildPaymentEnvelope,
+  submitEnvelopeWithFreighter,
   pathPaymentWithFreighter,
   changeTrustWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
+  submitFailureResult,
 } from "./freighter";
+import {
+  createFailedSubmitLog,
+  downloadFailedSubmitLog,
+} from "./failedSubmitLog";
 import { shortenAddress } from "./addressFormat";
 import {
   fundWithFriendbot,
   getAccountBalances,
   getAccountDetails,
+  getLiquidityPool,
   getTransactions,
   explorerAccountUrl,
   explorerTxUrl,
 } from "./stellar";
+import { poolShareRows } from "./poolShare";
 import { validatePaymentAmount } from "./validatePaymentAmount";
 import { fetchHealth, fetchNetworkInfo } from "./api";
 import {
@@ -27,9 +35,19 @@ import {
 } from "./network";
 import { validateAssetCode } from "./validateAssetCode";
 import { checkThresholds } from "./thresholdCheck";
+import { decodeTransactionEnvelope } from "./txInspector";
 import "./App.css";
 
-const TABS = ["Wallet", "Fund", "Assets", "Send", "Path", "History", "Lab"];
+const TABS = [
+  "Wallet",
+  "Fund",
+  "Assets",
+  "Send",
+  "Path",
+  "History",
+  "Inspect",
+  "Lab",
+];
 const PATH_MODE_FIELDS = {
   strictSend: {
     amountLabel: "Amount to send",
@@ -66,6 +84,7 @@ export default function App() {
   const [networkId, setNetworkId] = useState(getActiveNetworkId());
   const [freighterInstalled, setFreighterInstalled] = useState(null);
   const [balances, setBalances] = useState([]);
+  const [liquidityPools, setLiquidityPools] = useState({});
   const [transactions, setTransactions] = useState([]);
   const [nextCursor, setNextCursor] = useState(null);
   const [loading, setLoading] = useState("");
@@ -92,32 +111,91 @@ export default function App() {
     path: "",
   });
   const [pathResult, setPathResult] = useState(null);
+  const [unsignedEnvelope, setUnsignedEnvelope] = useState(null);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
   const [labState, setLabState] = useState(null);
   const [labStateError, setLabStateError] = useState(null);
   const [registerForm, setRegisterForm] = useState({ name: "" });
   const [lastRegisterTx, setLastRegisterTx] = useState(null);
+  const [inspectForm, setInspectForm] = useState({ xdr: "" });
+  const [inspectResult, setInspectResult] = useState(null);
+  const [inspectError, setInspectError] = useState(null);
   const tabRefs = useRef([]);
   const [accountDetails, setAccountDetails] = useState(null);
   const [selectedSigners, setSelectedSigners] = useState([]);
+  const [failedSubmits, setFailedSubmits] = useState([]);
+  const failedSubmitLogRef = useRef(createFailedSubmitLog());
 
   const showToast = (message, type = "success", explorerUrl = null) => {
     setToast({ message, type, explorerUrl });
     setTimeout(() => setToast(null), 4200);
   };
 
+  /** Append a failed submit to the in-memory session list (not localStorage). */
+  const trackFailedSubmit = (operationType, error) => {
+    failedSubmitLogRef.current.record({
+      operationType,
+      network: getActiveNetworkId(),
+      result: submitFailureResult(error),
+    });
+    setFailedSubmits(failedSubmitLogRef.current.list());
+  };
+
+  const handleDownloadFailedSubmits = () => {
+    if (failedSubmits.length === 0) return;
+    downloadFailedSubmitLog(failedSubmitLogRef.current);
+  };
+
   const xlmBalance = balances.find((b) => b.isNative)?.balance ?? null;
+  const assetBalances = balances.filter((b) => !b.isPoolShare);
+  const poolShares = poolShareRows(balances, liquidityPools);
   const memoField = MEMO_FIELDS[sendForm.memoType];
   const activeNetwork = NETWORKS[networkId];
   const friendbotAvailable = isFriendbotAvailable();
   const pathModeField = PATH_MODE_FIELDS[pathForm.mode];
   const updatePathForm = (changes) => setPathForm((prev) => ({ ...prev, ...changes }));
+  // Any edit changes the operation list, so the previewed envelope is stale.
+  const updateSendForm = (changes) => {
+    setSendForm((prev) => ({ ...prev, ...changes }));
+    setUnsignedEnvelope(null);
+  };
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
 
   useEffect(() => {
     checkFreighterInstalled().then(setFreighterInstalled);
   }, []);
+
+  // A pool-share balance only says how many shares the account holds. Load
+  // each pool so the panel can also show both reserves and the total shares.
+  useEffect(() => {
+    const poolIds = [
+      ...new Set(
+        balances.filter((b) => b.isPoolShare && b.poolId).map((b) => b.poolId)
+      ),
+    ];
+
+    if (poolIds.length === 0) return;
+
+    let cancelled = false;
+    for (const poolId of poolIds) {
+      getLiquidityPool(poolId)
+        .then((pool) => {
+          if (!cancelled) {
+            setLiquidityPools((previous) => ({ ...previous, [poolId]: pool }));
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setLiquidityPools((previous) => ({ ...previous, [poolId]: null }));
+          }
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [balances]);
 
   const refreshBalances = useCallback(async () => {
     if (!publicKey) return;
@@ -161,6 +239,8 @@ export default function App() {
   };
 
   const handleDisconnect = () => {
+    failedSubmitLogRef.current.clear();
+    setFailedSubmits([]);
     setPublicKey(null);
     setBalances([]);
     setTransactions([]);
@@ -176,6 +256,8 @@ export default function App() {
       setBalances([]);
       setTransactions([]);
       setAccountDetails(null);
+      setInspectResult(null);
+      setInspectError(null);
       showToast(`Switched to ${next.label}. Refresh to load balances.`, "info");
       if (publicKey) refreshBalances();
     } catch (e) {
@@ -223,6 +305,7 @@ export default function App() {
       setTrustForm({ code: "", issuer: "", limit: "1000000" });
       showToast(`Trustline for ${code} submitted.`);
     } catch (err) {
+      trackFailedSubmit("changeTrust", err);
       showToast(err.message || "Change trust failed.", "error");
     } finally {
       setLoading("");
@@ -245,7 +328,89 @@ export default function App() {
       setBalances(next);
       showToast(`${asset.code} trustline removed.`);
     } catch (err) {
+      trackFailedSubmit("changeTrust", err);
       showToast(err.message || `Could not remove the ${asset.code} trustline.`, "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  /** Validate the send form and return the args shared by preview and send. */
+  const sendFormArgs = () => {
+    if (!publicKey) {
+      showToast("Connect Freighter first.", "error");
+      return null;
+    }
+    if (!sendForm.destination) {
+      showToast("Destination is required.", "error");
+      return null;
+    }
+    let amount;
+    try {
+      amount = validatePaymentAmount(sendForm.amount);
+    } catch (err) {
+      showToast(err.message, "error");
+      return null;
+    }
+    if (
+      sendForm.memoType === "text" &&
+      new TextEncoder().encode(sendForm.memo).length > 28
+    ) {
+      showToast("Text memos must be 28 UTF-8 bytes or fewer.", "error");
+      return null;
+    }
+
+    const selected = balances.find((b) => b.key === sendForm.assetKey);
+    if (!selected) {
+      showToast("Choose an asset you hold a trustline for.", "error");
+      return null;
+    }
+    if (parseFloat(amount) > parseFloat(selected.balance)) {
+      showToast(
+        `Insufficient ${selected.code} balance. Available: ${selected.balance}.`,
+        "error"
+      );
+      return null;
+    }
+
+    return {
+      destination: sendForm.destination,
+      amount,
+      asset: selected.isNative
+        ? { isNative: true }
+        : { isNative: false, code: selected.code, issuer: selected.issuer },
+      memoType: sendForm.memoType,
+      memo: sendForm.memo,
+    };
+  };
+
+  const buildSendEnvelope = async () => {
+    const args = sendFormArgs();
+    if (!args) return null;
+
+    return buildPaymentEnvelope(
+      publicKey,
+      args.destination,
+      args.amount,
+      args.asset,
+      args.memoType,
+      args.memo
+    );
+  };
+
+  /** Build the unsigned envelope only: never signs and never submits. */
+  const handlePreviewEnvelope = async () => {
+    setLoading("preview");
+    try {
+      const xdr = await buildSendEnvelope();
+      if (!xdr) return;
+      setUnsignedEnvelope(xdr);
+      showToast(
+        "Unsigned envelope ready. Nothing was signed or submitted.",
+        "info"
+      );
+    } catch (err) {
+      showToast(err.message || "Could not build the unsigned envelope.", "error");
     } finally {
       setLoading("");
     }
@@ -253,47 +418,31 @@ export default function App() {
 
   const handleSend = async (e) => {
     e.preventDefault();
-    if (!publicKey) return showToast("Connect Freighter first.", "error");
-    if (!sendForm.destination) {
-      return showToast("Destination is required.", "error");
-    }
-    let amount;
-    try {
-      amount = validatePaymentAmount(sendForm.amount);
-    } catch (err) {
-      return showToast(err.message, "error");
-    }
-    if (
-      sendForm.memoType === "text" &&
-      new TextEncoder().encode(sendForm.memo).length > 28
-    ) {
-      return showToast("Text memos must be 28 UTF-8 bytes or fewer.", "error");
-    }
+    const args = sendFormArgs();
+    if (!args) return;
 
-    const selected = balances.find((b) => b.key === sendForm.assetKey);
-    if (!selected) {
-      return showToast("Choose an asset you hold a trustline for.", "error");
+    // Show the envelope before Freighter opens so it can be copied or handed
+    // to another signer. The same XDR is signed on the next click.
+    if (!unsignedEnvelope) {
+      try {
+        const xdr = await buildSendEnvelope();
+        if (!xdr) return;
+        setUnsignedEnvelope(xdr);
+        showToast(
+          "Review the unsigned envelope, then click Sign & send to sign this exact XDR.",
+          "info"
+        );
+      } catch (err) {
+        showToast(err.message || "Could not build the unsigned envelope.", "error");
+      }
+      return;
     }
-    if (parseFloat(amount) > parseFloat(selected.balance)) {
-      return showToast(
-        `Insufficient ${selected.code} balance. Available: ${selected.balance}.`,
-        "error"
-      );
-    }
-
-    const asset = selected.isNative
-      ? { isNative: true }
-      : { isNative: false, code: selected.code, issuer: selected.issuer };
 
     setLoading("send");
     try {
-      const result = await sendPaymentWithFreighter(
-        publicKey,
-        sendForm.destination,
-        amount,
-        asset,
-        sendForm.memoType,
-        sendForm.memo
+      const result = await submitEnvelopeWithFreighter(
+        unsignedEnvelope,
+        publicKey
       );
       const next = await getAccountBalances(publicKey);
       setBalances(next);
@@ -304,12 +453,14 @@ export default function App() {
         memoType: "text",
         memo: "",
       });
+      setUnsignedEnvelope(null);
       showToast(
         `Payment submitted · ${result.hash.slice(0, 12)}…`,
         "success",
         explorerTxUrl(result.hash)
       );
     } catch (err) {
+      trackFailedSubmit("payment", err);
       showToast(err.message || "Payment failed.", "error");
     } finally {
       setLoading("");
@@ -364,6 +515,7 @@ export default function App() {
       }
       showToast(`Path payment submitted · ${result.hash.slice(0, 12)}…`);
     } catch (err) {
+      trackFailedSubmit("pathPayment", err);
       showToast(err.message || "Path payment failed.", "error");
     } finally {
       setLoading("");
@@ -472,9 +624,23 @@ export default function App() {
       const state = await readKitewellState(contractId, publicKey);
       setLabState(state);
     } catch (err) {
+      trackFailedSubmit("register", err);
       showToast(err.message || "Contract invoke failed.", "error");
     } finally {
       setLoading("");
+    }
+  };
+
+  const handleInspect = (event) => {
+    event.preventDefault();
+    setInspectError(null);
+    setInspectResult(null);
+    try {
+      setInspectResult(
+        decodeTransactionEnvelope(inspectForm.xdr, activeNetwork.passphrase)
+      );
+    } catch (e) {
+      setInspectError(e.message || "XDR could not be read.");
     }
   };
 
@@ -608,7 +774,7 @@ export default function App() {
               {balances.filter((b) => !b.isNative).length > 0 && (
                 <div className="asset-chips">
                   {balances
-                    .filter((b) => !b.isNative)
+                    .filter((b) => !b.isNative && !b.isPoolShare)
                     .slice(0, 6)
                     .map((b) => (
                       <span key={b.key} className="chip">
@@ -904,9 +1070,9 @@ export default function App() {
                 <code>signTransaction</code>. Removing sets the limit to 0.
               </p>
 
-              {balances.length > 0 ? (
+              {assetBalances.length > 0 ? (
                 <ul className="balance-list">
-                  {balances.map((b) => (
+                  {assetBalances.map((b) => (
                     <li key={b.key} className="balance-row">
                       <div>
                         <strong>{b.code}</strong>
@@ -949,6 +1115,51 @@ export default function App() {
                     ? "Connect a wallet to load balances."
                     : "No balances yet — fund the account first."}
                 </p>
+              )}
+
+              {poolShares.length > 0 && (
+                <div className="section">
+                  <h3 className="subhead">Liquidity pool shares</h3>
+                  {poolShares.map((row) => (
+                    <div key={row.poolId} className="info-box">
+                      <span className="eyebrow">Pool {shortenAddress(row.poolId)}</span>
+                      <div className="metadata-grid">
+                        <div>
+                          <span className="metadata-label">Your shares</span>
+                          <span className="metadata-value">{row.shares}</span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Total shares</span>
+                          <span className="metadata-value">
+                            {row.totalShares ?? "—"}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Your share</span>
+                          <span className="metadata-value">
+                            {row.percentage !== null ? `${row.percentage}%` : "—"}
+                          </span>
+                        </div>
+                      </div>
+                      {row.loading ? (
+                        <p className="muted">Loading pool reserves…</p>
+                      ) : row.reservesUnavailable ? (
+                        <p className="muted">
+                          Reserves unavailable — Horizon could not load this pool.
+                        </p>
+                      ) : (
+                        <div className="metadata-grid">
+                          {row.reserves.map((reserve) => (
+                            <div key={reserve.label}>
+                              <span className="metadata-label">{reserve.label}</span>
+                              <span className="metadata-value">{reserve.balance}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               )}
 
               <form onSubmit={handleTrust} className="form">
@@ -1009,8 +1220,8 @@ export default function App() {
             <div className="section">
               <h2>Send payment</h2>
               <p className="muted">
-                Builds a payment op for XLM or a credit asset you hold, signs in Freighter, then
-                submits to Horizon Testnet.
+                Builds a payment op for XLM or a credit asset you hold. Review the unsigned
+                envelope XDR, then sign in Freighter to submit it to Horizon Testnet.
               </p>
               <form onSubmit={handleSend} className="form">
                 <label className="label" htmlFor="send-destination">
@@ -1022,7 +1233,7 @@ export default function App() {
                   type="text"
                   placeholder="G…"
                   value={sendForm.destination}
-                  onChange={(e) => setSendForm({ ...sendForm, destination: e.target.value })}
+                  onChange={(e) => updateSendForm({ destination: e.target.value })}
                   required
                 />
                 <label className="label" htmlFor="send-asset">
@@ -1032,11 +1243,11 @@ export default function App() {
                   id="send-asset"
                   className="input"
                   value={sendForm.assetKey}
-                  onChange={(e) => setSendForm({ ...sendForm, assetKey: e.target.value })}
+                  onChange={(e) => updateSendForm({ assetKey: e.target.value })}
                 >
                   <option value="native">XLM (native)</option>
                   {balances
-                    .filter((b) => !b.isNative)
+                    .filter((b) => !b.isNative && !b.isPoolShare)
                     .map((b) => (
                       <option key={b.key} value={b.key}>
                         {b.code} ·{" "}
@@ -1057,7 +1268,7 @@ export default function App() {
                   min="0.0000001"
                   placeholder="e.g. 10"
                   value={sendForm.amount}
-                  onChange={(e) => setSendForm({ ...sendForm, amount: e.target.value })}
+                  onChange={(e) => updateSendForm({ amount: e.target.value })}
                   required
                 />
                 <label className="label" htmlFor="send-memo-type">
@@ -1068,11 +1279,7 @@ export default function App() {
                   className="input"
                   value={sendForm.memoType}
                   onChange={(e) =>
-                    setSendForm({
-                      ...sendForm,
-                      memoType: e.target.value,
-                      memo: "",
-                    })
+                    updateSendForm({ memoType: e.target.value, memo: "" })
                   }
                 >
                   <option value="text">Text</option>
@@ -1091,21 +1298,62 @@ export default function App() {
                   inputMode={memoField.inputMode}
                   placeholder={memoField.placeholder}
                   value={sendForm.memo}
-                  onChange={(e) => setSendForm({ ...sendForm, memo: e.target.value })}
+                  onChange={(e) => updateSendForm({ memo: e.target.value })}
                 />
-                <button
-                  className="btn btn--primary"
-                  type="submit"
-                  disabled={loading === "send" || requireWallet}
-                >
-                  {loading === "send" ? (
-                    <>
-                      <Spinner /> Signing in Freighter…
-                    </>
-                  ) : (
-                    "Sign & send"
-                  )}
-                </button>
+                {unsignedEnvelope && (
+                  <div className="info-box">
+                    <span className="eyebrow">Unsigned envelope XDR</span>
+                    <code style={{ wordBreak: "break-all" }}>
+                      {unsignedEnvelope}
+                    </code>
+                    <p className="muted">
+                      Copy this envelope to hand it to another signer or the decoder.
+                      Copying does not sign or submit it.
+                    </p>
+                    <button
+                      className="btn btn--secondary btn--sm"
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(unsignedEnvelope);
+                        showToast(
+                          "Unsigned envelope copied. Nothing was signed or submitted.",
+                          "info"
+                        );
+                      }}
+                    >
+                      Copy XDR
+                    </button>
+                  </div>
+                )}
+                <div className="section__row">
+                  <button
+                    className="btn btn--secondary"
+                    type="button"
+                    onClick={handlePreviewEnvelope}
+                    disabled={loading === "preview" || requireWallet}
+                  >
+                    {loading === "preview" ? (
+                      <>
+                        <Spinner /> Building…
+                      </>
+                    ) : (
+                      "Build unsigned envelope"
+                    )}
+                  </button>
+                  <button
+                    className="btn btn--primary"
+                    type="submit"
+                    disabled={loading === "send" || loading === "preview" || requireWallet}
+                  >
+                    {loading === "send" ? (
+                      <>
+                        <Spinner /> Signing in Freighter…
+                      </>
+                    ) : (
+                      "Sign & send"
+                    )}
+                  </button>
+                </div>
               </form>
             </div>
           )}
@@ -1293,6 +1541,50 @@ export default function App() {
             </div>
           )}
 
+          {activeTab === "Inspect" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Inspect transaction</h2>
+              </div>
+              <p className="muted">
+                Paste a base64 transaction envelope to read it before signing. It is
+                decoded locally on {activeNetwork.label}; nothing is submitted.
+              </p>
+              <form className="form" onSubmit={handleInspect}>
+                <label className="label" htmlFor="inspect-xdr">
+                  Transaction envelope (base64 XDR)
+                </label>
+                <textarea
+                  id="inspect-xdr"
+                  className="input"
+                  rows={5}
+                  spellCheck={false}
+                  placeholder="AAAAAgAAAAA..."
+                  value={inspectForm.xdr}
+                  onChange={(e) =>
+                    setInspectForm({ ...inspectForm, xdr: e.target.value })
+                  }
+                />
+                <button className="btn btn--primary" type="submit">
+                  Decode
+                </button>
+              </form>
+              {inspectError && (
+                <div className="info-box info-box--warning" role="alert">
+                  <span className="eyebrow">Could not decode</span>
+                  <p className="muted">{inspectError}</p>
+                </div>
+              )}
+              {inspectResult && <DecodedEnvelope decoded={inspectResult} />}
+              {!inspectResult && !inspectError && (
+                <p className="muted">
+                  The source, fee, sequence, memo, time bounds, and one block per
+                  operation will appear here.
+                </p>
+              )}
+            </div>
+          )}
+
           {activeTab === "Lab" && (
             <div className="section">
               <div className="section__row">
@@ -1441,6 +1733,24 @@ export default function App() {
               {!labInfo && !labError && (
                 <p className="muted">Open this tab to probe the backend.</p>
               )}
+              <div className="info-box">
+                <span className="eyebrow">Failed submits</span>
+                <p className="muted">
+                  {failedSubmits.length === 0
+                    ? "No failed submits this session yet."
+                    : `${failedSubmits.length} failed submission${
+                        failedSubmits.length === 1 ? "" : "s"
+                      } this session. Cleared on disconnect or reload — not stored in localStorage.`}
+                </p>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={handleDownloadFailedSubmits}
+                  disabled={failedSubmits.length === 0}
+                >
+                  Download failed JSON
+                </button>
+              </div>
             </div>
           )}
 
@@ -1541,6 +1851,86 @@ export default function App() {
         </a>
       </footer>
     </div>
+  );
+}
+
+function DecodedEnvelope({ decoded }) {
+  const networkLabel = decoded.network?.label || decoded.network?.passphrase;
+  const transaction = decoded.isFeeBump ? decoded.inner : decoded;
+
+  return (
+    <div className="inspect-result">
+      <div className="info-box">
+        <span className="eyebrow">Decoded on</span>
+        <code>{networkLabel || "Selected network"}</code>
+      </div>
+      {decoded.isFeeBump && (
+        <div className="info-box">
+          <span className="eyebrow">Fee-bump · fee source</span>
+          <code>{decoded.feeSource}</code>
+          <p className="muted" style={{ marginTop: 6 }}>
+            Outer fee: {decoded.fee} stroops
+          </p>
+        </div>
+      )}
+      <div className="subhead">
+        {decoded.isFeeBump ? "Inner transaction" : "Transaction"}
+      </div>
+      <TransactionDetails transaction={transaction} />
+    </div>
+  );
+}
+
+function TransactionDetails({ transaction }) {
+  const memo = transaction.memo
+    ? `${transaction.memo.type}: ${transaction.memo.value}`
+    : "None";
+  const timeBounds = transaction.timeBounds
+    ? `${transaction.timeBounds.minTime} – ${transaction.timeBounds.maxTime}`
+    : "None";
+
+  return (
+    <>
+      <div className="info-box">
+        <div className="metadata-grid">
+          <div>
+            <span className="metadata-label">Source</span>
+            <span className="metadata-value">{transaction.source}</span>
+          </div>
+          <div>
+            <span className="metadata-label">Fee</span>
+            <span className="metadata-value">{transaction.fee} stroops</span>
+          </div>
+          <div>
+            <span className="metadata-label">Sequence</span>
+            <span className="metadata-value">{transaction.sequence}</span>
+          </div>
+          <div>
+            <span className="metadata-label">Memo</span>
+            <span className="metadata-value">{memo}</span>
+          </div>
+          <div>
+            <span className="metadata-label">Time bounds</span>
+            <span className="metadata-value">{timeBounds}</span>
+          </div>
+        </div>
+      </div>
+      {transaction.operations.map((operation) => (
+        <div className="info-box" key={operation.index}>
+          <span className="eyebrow">
+            Operation {operation.index + 1} · {operation.type}
+          </span>
+          <div className="metadata-grid">
+            {operation.fields.map((field) => (
+              <div key={field.key}>
+                <span className="metadata-label">{field.label}</span>
+                <span className="metadata-value">{field.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </>
   );
 }
 
