@@ -98,6 +98,18 @@ export async function fundWithFriendbot(publicKey) {
 
 function mapHorizonBalances(account) {
   return account.balances.map((b) => {
+    if (b.asset_type === "liquidity_pool_shares") {
+      return {
+        key: `pool:${b.liquidity_pool_id}`,
+        code: "POOL",
+        issuer: null,
+        balance: b.balance,
+        limit: null,
+        isNative: false,
+        isPoolShare: true,
+        poolId: b.liquidity_pool_id,
+      };
+    }
     if (b.asset_type === "native") {
       return {
         key: "native",
@@ -158,6 +170,20 @@ export async function getBalance(publicKey) {
   const balances = await getAccountBalances(publicKey);
   const xlm = balances.find((b) => b.isNative);
   return xlm ? xlm.balance : "0";
+}
+
+/**
+ * Load one liquidity pool (both reserves and total shares) from Horizon.
+ *
+ * @param {string} poolId Horizon liquidity-pool id (`hex`).
+ * @returns {Promise<object>} The Horizon liquidity-pool record.
+ */
+export async function getLiquidityPool(poolId) {
+  if (typeof poolId !== "string" || !poolId) {
+    throw new Error("A liquidity pool id is required.");
+  }
+
+  return getServer().liquidityPools().liquidityPoolId(poolId).call();
 }
 
 /**
