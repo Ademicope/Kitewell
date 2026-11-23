@@ -404,3 +404,92 @@ export async function getTransactions(publicKey, limit = 15, cursor) {
     nextCursor: null,
   };
 }
+
+/**
+ * Fetch and parse stellar.toml for a domain or issuer account.
+ *
+ * @param {string} domainOrIssuer Either a domain (e.g., "example.com") or a
+ *   Stellar public key (G...). When an issuer is provided, the SDK resolves
+ *   the home_domain from the account's on-chain data.
+ * @returns {Promise<object>} Parsed stellar.toml with keys like
+ *   TRANSFER_SERVER, WEB_AUTH_ENDPOINT, KYC_SERVER, CURRENCIES, etc.
+ */
+export async function fetchStellarToml(domainOrIssuer) {
+  if (!domainOrIssuer || typeof domainOrIssuer !== "string") {
+    throw new Error("Domain or issuer address is required.");
+  }
+
+  const trimmed = domainOrIssuer.trim();
+  if (!trimmed) {
+    throw new Error("Domain or issuer address is required.");
+  }
+
+  return StellarSdk.StellarTomlResolver.resolve(trimmed, {
+    allowHttp: false,
+  });
+}
+
+/**
+ * Fetch the SEP-24 info endpoint from a transfer server URL.
+ *
+ * @param {string} transferServerUrl The TRANSFER_SERVER URL from stellar.toml.
+ * @returns {Promise<object>} The parsed JSON response from the /info endpoint,
+ *   including deposit and withdraw asset details.
+ */
+export async function fetchTransferServerInfo(transferServerUrl) {
+  if (!transferServerUrl || typeof transferServerUrl !== "string") {
+    throw new Error("Transfer server URL is required.");
+  }
+
+  const trimmed = transferServerUrl.trim();
+  if (!trimmed) {
+    throw new Error("Transfer server URL is required.");
+  }
+
+  // Only allow HTTPS URLs for security
+  if (!trimmed.startsWith("https://")) {
+    throw new Error("Transfer server URL must use HTTPS.");
+  }
+
+  // Build info endpoint URL, ensuring no double slashes
+  const baseUrl = trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+  const infoUrl = `${baseUrl}/info`;
+
+  const response = await fetch(infoUrl);
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch transfer server info: ${response.status} ${response.statusText}`
+    );
+  }
+
+  return response.json();
+}
+
+/**
+ * Fetch stellar.toml and optionally the transfer server info for a domain or issuer.
+ *
+ * @param {string} domainOrIssuer Either a domain (e.g., "example.com") or a
+ *   Stellar public key (G...).
+ * @returns {Promise<object>} An object with:
+ *   - toml: The parsed stellar.toml
+ *   - transferServerInfo: The parsed /info response (null if TRANSFER_SERVER
+ *     is absent or the fetch fails)
+ */
+export async function fetchAnchorInfo(domainOrIssuer) {
+  const toml = await fetchStellarToml(domainOrIssuer);
+
+  let transferServerInfo = null;
+  if (toml.TRANSFER_SERVER) {
+    try {
+      transferServerInfo = await fetchTransferServerInfo(toml.TRANSFER_SERVER);
+    } catch {
+      // If the info endpoint fails, we still return the toml data
+      transferServerInfo = null;
+    }
+  }
+
+  return {
+    toml,
+    transferServerInfo,
+  };
+}
