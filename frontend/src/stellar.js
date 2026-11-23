@@ -53,17 +53,11 @@ export function formatDataValue(value) {
 
   let bytes;
   if (typeof value === "string") {
-    if (/^[0-9a-fA-F]*$/.test(value) && value.length % 2 === 0 && value.length > 0) {
-      bytes = Uint8Array.from(
-        value.match(/.{2}/g).map((part) => parseInt(part, 16))
-      );
-    } else {
-      try {
-        const binary = atob(value);
-        bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-      } catch {
-        bytes = new TextEncoder().encode(value);
-      }
+    try {
+      const binary = atob(value);
+      bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    } catch {
+      bytes = new TextEncoder().encode(value);
     }
   } else if (value instanceof Uint8Array) {
     bytes = value;
@@ -85,7 +79,12 @@ export function mapAccountDataEntries(account) {
       .map((entry) => ({ name: entry.name, value: entry.value }));
   }
 
-  const data = account?.data;
+  let data = account?.data_attr;
+  if ((!data || typeof data !== "object") && typeof account?.data === "function") {
+    data = account.data();
+  } else if ((!data || typeof data !== "object") && account?.data && typeof account.data === "object") {
+    data = account.data;
+  }
   if (!data || typeof data !== "object") return [];
   return Object.entries(data)
     .sort(([left], [right]) => left.localeCompare(right))

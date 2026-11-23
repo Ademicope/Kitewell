@@ -273,7 +273,19 @@ describe("balance mapping", () => {
 
 describe("account data helpers", () => {
   it("maps and sorts account data entries", () => {
-    expect(mapAccountDataEntries({ data: { z: "eg==", a: "aGVsbG8=" } })).toEqual([
+    expect(mapAccountDataEntries({ data_attr: { z: "eg==", a: "aGVsbG8=" } })).toEqual([
+      { name: "a", value: "aGVsbG8=" },
+      { name: "z", value: "eg==" },
+    ]);
+  });
+
+  it("reads the Horizon AccountResponse data method", () => {
+    expect(
+      mapAccountDataEntries({
+        data_attr: undefined,
+        data: () => ({ z: "eg==", a: "aGVsbG8=" }),
+      })
+    ).toEqual([
       { name: "a", value: "aGVsbG8=" },
       { name: "z", value: "eg==" },
     ]);
