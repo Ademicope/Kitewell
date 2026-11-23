@@ -29,6 +29,7 @@ import {
   getTransactions,
   explorerAccountUrl,
   explorerTxUrl,
+  downloadAccountSnapshot,
   getAccountAuthConfig,
   getIssuedAssetTrustlines,
   IMMUTABLE_CONFIRMATION,
@@ -218,6 +219,19 @@ export default function App() {
   const handleDownloadFailedSubmits = () => {
     if (failedSubmits.length === 0) return;
     downloadFailedSubmitLog(failedSubmitLogRef.current);
+  };
+
+  const handleDownloadAccountSnapshot = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading("snapshot");
+    try {
+      await downloadAccountSnapshot(publicKey);
+      showToast("Account snapshot downloaded.");
+    } catch (e) {
+      showToast(e.message || "Could not download account snapshot.", "error");
+    } finally {
+      setLoading("");
+    }
   };
 
   const xlmBalance = balances.find((b) => b.isNative)?.balance ?? null;
@@ -1400,9 +1414,26 @@ export default function App() {
                       </a>
                     </div>
                   )}
-                  <button className="btn btn--secondary" type="button" onClick={handleDisconnect}>
-                    Disconnect
-                  </button>
+                  <div className="section__row">
+                    <button className="btn btn--secondary" type="button" onClick={handleDisconnect}>
+                      Disconnect
+                    </button>
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      onClick={handleDownloadAccountSnapshot}
+                      disabled={loading === "snapshot"}
+                      title="Download a JSON snapshot of this account"
+                    >
+                      {loading === "snapshot" ? (
+                        <>
+                          <Spinner /> Exporting…
+                        </>
+                      ) : (
+                        "Download account JSON"
+                      )}
+                    </button>
+                  </div>
                 </>
               )}
             </div>
