@@ -520,6 +520,13 @@ export default function App() {
       showToast("Choose an asset you hold a trustline for.", "error");
       return null;
     }
+    if (!selected.isNative && selected.isAuthorized === false) {
+      showToast(
+        `${selected.code} is unauthorized by its issuer and cannot be sent.`,
+        "error"
+      );
+      return null;
+    }
     if (parseFloat(amount) > parseFloat(selected.balance)) {
       showToast(
         `Insufficient ${selected.code} balance. Available: ${selected.balance}.`,
@@ -1465,6 +1472,13 @@ export default function App() {
                             {shortenAddress(b.issuer)}
                           </span>
                         )}
+                        {!b.isNative && (
+                          <div className="muted balance-row__flags">
+                            Authorization: {b.isAuthorized === true ? "Authorized" : b.isAuthorized === false ? "Unauthorized" : "Unknown"}
+                            {" · "}Liabilities: {b.isAuthorizedToMaintainLiabilities === true ? "Authorized" : b.isAuthorizedToMaintainLiabilities === false ? "Unauthorized" : "Unknown"}
+                            {" · "}Clawback: {b.clawbackEnabled === true ? "Enabled" : b.clawbackEnabled === false ? "Disabled" : "Unknown"}
+                          </div>
+                        )}
                       </div>
                       <div className="balance-row__actions">
                         <span>
@@ -1880,14 +1894,20 @@ export default function App() {
                   {balances
                     .filter((b) => !b.isNative && !b.isPoolShare)
                     .map((b) => (
-                      <option key={b.key} value={b.key}>
+                      <option key={b.key} value={b.key} disabled={b.isAuthorized === false}>
                         {b.code} ·{" "}
                         {parseFloat(b.balance).toLocaleString(undefined, {
                           maximumFractionDigits: 4,
                         })}
+                        {b.isAuthorized === false ? " · unauthorized (cannot send)" : ""}
                       </option>
                     ))}
                 </select>
+                {selectedSendAsset?.isAuthorized === false && (
+                  <p className="muted" role="alert">
+                    {selectedSendAsset.code} is unauthorized by its issuer, so it cannot be selected as a send asset.
+                  </p>
+                )}
                 <label className="label" htmlFor="send-amount">
                   Amount ({selectedSendAsset?.code ?? "XLM"})
                 </label>

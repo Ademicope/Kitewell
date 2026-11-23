@@ -73,6 +73,9 @@ function horizonAccountFixture() {
         asset_issuer: "GISSUER",
         balance: "11.0000000",
         limit: "1000.0000000",
+        is_authorized: false,
+        is_authorized_to_maintain_liabilities: true,
+        clawback_enabled: false,
       },
     ],
   };
@@ -228,6 +231,9 @@ describe("balance mapping", () => {
         balance: "11.0000000",
         limit: "1000.0000000",
         isNative: false,
+        isAuthorized: false,
+        isAuthorizedToMaintainLiabilities: true,
+        clawbackEnabled: false,
       },
     ]);
   });
