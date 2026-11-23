@@ -271,7 +271,55 @@ export async function fundWithFriendbot(publicKey) {
   return response.json();
 }
 
-function mapHorizonBalances(account) {
+/**
+ * Spendable balance after reserves and selling liabilities.
+ * Native XLM keeps the base reserve for the account plus each subentry.
+ * Credit assets only subtract selling liabilities. Buying liabilities are reported, not subtracted.
+ */
+export function calculateAvailableBalance(
+  balance,
+  isNative,
+  subentryCount = 0,
+  baseReserve = 0.5
+) {
+  const total = parseFloat(balance.balance || "0");
+  const sellingLiabilities = parseFloat(balance.selling_liabilities || "0");
+
+  if (isNative) {
+    const minBalance = baseReserve * (2 + subentryCount);
+    return Math.max(0, total - minBalance - sellingLiabilities).toFixed(7);
+  }
+
+  return Math.max(0, total - sellingLiabilities).toFixed(7);
+}
+
+function liabilityFields(balance, isNative, subentryCount, baseReserve) {
+  const sellingLiabilities = parseFloat(balance.selling_liabilities || "0");
+  const buyingLiabilities = parseFloat(balance.buying_liabilities || "0");
+  return {
+    sellingLiabilities: sellingLiabilities.toFixed(7),
+    buyingLiabilities: buyingLiabilities.toFixed(7),
+    available: calculateAvailableBalance(balance, isNative, subentryCount, baseReserve),
+  };
+}
+
+async function readBaseReserve() {
+  let baseReserve = 0.5;
+  try {
+    if (getServer().ledgers) {
+      const ledgerInfo = await getServer().ledgers().order("desc").limit(1).call();
+      if (ledgerInfo.records[0]?.base_reserve_in_stroops) {
+        baseReserve = parseFloat(ledgerInfo.records[0].base_reserve_in_stroops) / 10000000;
+      }
+    }
+  } catch {
+    // Keep the protocol default when the ledgers endpoint is unavailable.
+  }
+  return baseReserve;
+}
+
+function mapHorizonBalances(account, baseReserve = 0.5) {
+  const subentryCount = account.subentry_count || 0;
   return account.balances.map((b) => {
     if (b.asset_type === "liquidity_pool_shares") {
       return {
@@ -293,6 +341,7 @@ function mapHorizonBalances(account) {
         balance: b.balance,
         limit: null,
         isNative: true,
+        ...liabilityFields(b, true, subentryCount, baseReserve),
       };
     }
     return {
@@ -310,6 +359,7 @@ function mapHorizonBalances(account) {
           : null,
       clawbackEnabled:
         typeof b.clawback_enabled === "boolean" ? b.clawback_enabled : null,
+      ...liabilityFields(b, false, subentryCount, baseReserve),
     };
   });
 }
@@ -326,7 +376,7 @@ export async function getAccountBalances(publicKey) {
   }
 
   const account = await getServer().loadAccount(publicKey);
-  return mapHorizonBalances(account);
+  return mapHorizonBalances(account, await readBaseReserve());
 }
 
 export async function getAccountDetails(publicKey) {
@@ -344,7 +394,7 @@ export async function getAccountDetails(publicKey) {
     sequence: account.sequenceNumber(),
     subentryCount: account.subentry_count,
     thresholds: account.thresholds,
-    balances: mapHorizonBalances(account),
+    balances: mapHorizonBalances(account, await readBaseReserve()),
     explorerUrl: explorerAccountUrl(publicKey),
   };
 }

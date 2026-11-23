@@ -13,6 +13,8 @@ import {
   allowTrustWithFreighter,
   readContractInstanceTtl,
   extendContractTtlWithFreighter,
+  readContractTTL,
+  extendCodeTTL,
   readKitewellEvents,
   submitFailureResult,
   signChallengeWithFreighter,
@@ -121,6 +123,7 @@ export default function App() {
     memo: "",
   });
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
+  const [limitChangeForm, setLimitChangeForm] = useState({});
   const [pathForm, setPathForm] = useState({
     mode: "strictSend",
     destination: "",
@@ -200,6 +203,8 @@ export default function App() {
   const [ttlError, setTtlError] = useState(null);
   const [ttlForm, setTtlForm] = useState({ extendTo: "" });
   const [ttlResult, setTtlResult] = useState(null);
+  const [codeTtl, setCodeTtl] = useState(null);
+  const [codeTtlError, setCodeTtlError] = useState(null);
   const [labEvents, setLabEvents] = useState([]);
   const [labEventsError, setLabEventsError] = useState(null);
   const eventCursorRef = useRef(null);
@@ -471,6 +476,48 @@ export default function App() {
     }
   };
 
+  const handleChangeLimit = async (asset) => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+
+    const newLimit = limitChangeForm[asset.key];
+    if (!newLimit || newLimit.trim() === "") {
+      return showToast("Enter a new limit.", "error");
+    }
+
+    const limitNum = parseFloat(newLimit);
+    if (Number.isNaN(limitNum) || limitNum < 0) {
+      return showToast("Limit must be a non-negative number.", "error");
+    }
+
+    const balance = parseFloat(asset.balance);
+    if (limitNum < balance) {
+      return showToast(
+        `Limit (${newLimit}) cannot be below current balance (${asset.balance}).`,
+        "error"
+      );
+    }
+
+    setLoading(`limit-${asset.key}`);
+    try {
+      const result = await changeTrustWithFreighter(
+        publicKey,
+        asset.code,
+        asset.issuer,
+        newLimit
+      );
+      const next = await getAccountBalances(publicKey);
+      setBalances(next);
+      setLimitChangeForm({ ...limitChangeForm, [asset.key]: "" });
+      showToast(`${asset.code} trustline limit updated to ${newLimit}.`);
+      startTxWatch(result.hash);
+    } catch (err) {
+      trackFailedSubmit("changeTrust", err);
+      showToast(err.message || `Could not change ${asset.code} trustline limit.`, "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
   const handleRemoveTrust = async (asset) => {
     if (!publicKey) return showToast("Connect Freighter first.", "error");
     if (parseFloat(asset.balance) > 0) {
@@ -532,9 +579,10 @@ export default function App() {
       );
       return null;
     }
-    if (parseFloat(amount) > parseFloat(selected.balance)) {
+    const available = parseFloat(selected.available || selected.balance);
+    if (parseFloat(amount) > available) {
       showToast(
-        `Insufficient ${selected.code} balance. Available: ${selected.balance}.`,
+        `Insufficient ${selected.code} balance. Available: ${available.toFixed(7)} (after reserves and liabilities).`,
         "error"
       );
       return null;
@@ -953,6 +1001,52 @@ export default function App() {
     } catch (err) {
       setTtlInfo(null);
       setTtlError(err.message || "Could not read the instance TTL.");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const refreshCodeTtl = useCallback(async () => {
+    if (!configuredContractId) {
+      setCodeTtl(null);
+      setCodeTtlError(null);
+      return;
+    }
+    setLoading("code-ttl");
+    setCodeTtlError(null);
+    try {
+      const ttlData = await readContractTTL(configuredContractId);
+      setCodeTtl(ttlData);
+    } catch (err) {
+      setCodeTtl(null);
+      setCodeTtlError(err.message || "Could not read the contract code TTL.");
+    } finally {
+      setLoading("");
+    }
+  }, [configuredContractId]);
+
+  const handleExtendCodeTtl = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!configuredContractId) {
+      return showToast("No contract id configured.", "error");
+    }
+    if (!codeTtl?.wasmHash || !codeTtl?.currentLedger) {
+      return showToast("Refresh the code TTL first.", "error");
+    }
+
+    const extendTo = codeTtl.currentLedger + 100000;
+    setLoading("extend-code");
+    try {
+      const result = await extendCodeTTL(
+        publicKey,
+        codeTtl.wasmHash,
+        extendTo,
+        codeTtl.currentLedger
+      );
+      showToast(`Code TTL extended to ledger ${result.deadline}.`, "success");
+      await refreshCodeTtl();
+    } catch (err) {
+      showToast(err.message || "Failed to extend code TTL.", "error");
     } finally {
       setLoading("");
     }
@@ -1498,7 +1592,8 @@ export default function App() {
                       </div>
                       <div className="balance-row__actions">
                         <span>
-                          {parseFloat(b.balance).toLocaleString(undefined, {
+                          Available{" "}
+                          {parseFloat(b.available || b.balance).toLocaleString(undefined, {
                             maximumFractionDigits: 7,
                           })}
                         </span>
@@ -1520,6 +1615,41 @@ export default function App() {
                           </button>
                         )}
                       </div>
+                      {!b.isNative && (
+                        <div className="balance-row__actions">
+                          <span className="muted">
+                            Limit:{" "}
+                            {b.limit
+                              ? parseFloat(b.limit).toLocaleString(undefined, {
+                                  maximumFractionDigits: 7,
+                                })
+                              : "—"}
+                          </span>
+                          <input
+                            className="input"
+                            type="number"
+                            placeholder="New limit"
+                            value={limitChangeForm[b.key] || ""}
+                            onChange={(e) =>
+                              setLimitChangeForm({
+                                ...limitChangeForm,
+                                [b.key]: e.target.value,
+                              })
+                            }
+                            disabled={loading === `limit-${b.key}`}
+                          />
+                          <button
+                            className="btn btn--secondary btn--sm"
+                            type="button"
+                            onClick={() => handleChangeLimit(b)}
+                            disabled={
+                              loading === `limit-${b.key}` || !limitChangeForm[b.key]
+                            }
+                          >
+                            {loading === `limit-${b.key}` ? "Changing…" : "Change limit"}
+                          </button>
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -2553,6 +2683,61 @@ export default function App() {
                         Ledger {ttlResult.liveUntilLedgerSeq} ·{" "}
                         {ttlResult.hash}
                       </code>
+                    </div>
+                  )}
+
+                  <div className="section__row">
+                    <div className="subhead">Contract code TTL</div>
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      onClick={refreshCodeTtl}
+                      disabled={loading === "code-ttl" || !configuredContractId}
+                    >
+                      {loading === "code-ttl" ? "Reading…" : "Refresh code TTL"}
+                    </button>
+                  </div>
+                  <p className="muted">
+                    Extends the Wasm code entry on its own. The instance TTL above is left unchanged.
+                  </p>
+                  {codeTtlError && (
+                    <div className="info-box info-box--warning">
+                      <p className="muted">{codeTtlError}</p>
+                    </div>
+                  )}
+                  {codeTtl && (
+                    <div className="info-box">
+                      <span className="eyebrow">Code lifetime</span>
+                      <div className="metadata-grid">
+                        <div>
+                          <span className="metadata-label">Current ledger</span>
+                          <span className="metadata-value">{codeTtl.currentLedger}</span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Code TTL</span>
+                          <span className="metadata-value">
+                            {codeTtl.codeTTL ? `Ledger ${codeTtl.codeTTL}` : "—"}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Wasm hash</span>
+                          <span className="metadata-value">
+                            {codeTtl.wasmHash ? `${codeTtl.wasmHash.slice(0, 16)}…` : "—"}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        className="btn btn--secondary btn--sm"
+                        type="button"
+                        onClick={handleExtendCodeTtl}
+                        disabled={
+                          loading === "extend-code" ||
+                          !publicKey ||
+                          !codeTtl.wasmHash
+                        }
+                      >
+                        {loading === "extend-code" ? "Extending…" : "Extend code TTL"}
+                      </button>
                     </div>
                   )}
 
