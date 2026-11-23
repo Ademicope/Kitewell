@@ -723,9 +723,9 @@ export default function App() {
                         <div>
                           <span className="metadata-label">Thresholds</span>
                           <span className="metadata-value">
-                            {accountDetails.thresholds?.low ? accountDetails.thresholds.low : "—"},
-                            {accountDetails.thresholds?.medium ? accountDetails.thresholds.medium : "—"},
-                            {accountDetails.thresholds?.high ? accountDetails.thresholds.high : "—"}
+                            {accountDetails.thresholds?.low_threshold ?? "—"},{" "}
+                            {accountDetails.thresholds?.med_threshold ?? "—"},{" "}
+                            {accountDetails.thresholds?.high_threshold ?? "—"}
                           </span>
                         </div>
                       </div>
@@ -784,9 +784,9 @@ export default function App() {
                       </div>
                       {(() => {
                         const thresholds = {
-                          low: accountDetails.thresholds?.low || 0,
-                          medium: accountDetails.thresholds?.med_threshold || accountDetails.thresholds?.medium || 0,
-                          high: accountDetails.thresholds?.high_threshold || accountDetails.thresholds?.high || 0,
+                          low: accountDetails.thresholds?.low_threshold || 0,
+                          medium: accountDetails.thresholds?.med_threshold || 0,
+                          high: accountDetails.thresholds?.high_threshold || 0,
                         };
                         const result = checkThresholds(
                           accountDetails.signers,
