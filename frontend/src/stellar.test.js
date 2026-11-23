@@ -305,6 +305,17 @@ describe("account merge helpers", () => {
       "Offers: 123",
     ]);
   });
+
+  it("lists backend-mapped trustlines as blockers", () => {
+    const blockers = mergeBlockersFromAccount({
+      balances: [
+        { isNative: true, code: "XLM" },
+        { isNative: false, code: "USDC" },
+      ],
+    });
+
+    expect(blockers).toEqual(["Trustlines: USDC"]);
+  });
 });
 
 describe("account data helpers", () => {

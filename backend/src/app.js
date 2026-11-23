@@ -110,7 +110,7 @@ export function createApp({ horizon, env = process.env } = {}) {
         thresholds: account.thresholds,
         balances,
         signers: account.signers || [],
-        dataEntries: Object.entries(account.data || {})
+        dataEntries: Object.entries(account.data_attr || {})
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([name, value]) => ({ name, value })),
         explorerUrl: `${EXPLORER_BASE}/account/${address}`,
