@@ -218,6 +218,9 @@ describe("balance mapping", () => {
           balance: "11.0000000",
           limit: "1000.0000000",
           isNative: false,
+          isAuthorized: false,
+          isAuthorizedToMaintainLiabilities: true,
+          clawbackEnabled: false,
         },
       ],
     });
@@ -251,6 +254,9 @@ describe("balance mapping", () => {
         balance: "11.0000000",
         limit: "1000.0000000",
         isNative: false,
+        isAuthorized: false,
+        isAuthorizedToMaintainLiabilities: true,
+        clawbackEnabled: false,
       },
     ]);
   });

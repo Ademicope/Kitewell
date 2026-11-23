@@ -8,6 +8,7 @@ import {
   changeTrustWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
+  simulateRegisterBuilder,
   setAccountOptionsWithFreighter,
   allowTrustWithFreighter,
   readContractInstanceTtl,
@@ -37,6 +38,7 @@ import { poolShareRows } from "./poolShare";
 import { validatePaymentAmount } from "./validatePaymentAmount";
 import { fetchHealth, fetchNetworkInfo } from "./api";
 import { decodeEnvelope, formatArgumentValue } from "./envelopeDecoder";
+import { formatSimulationFee } from "./simulationFees";
 import {
   NETWORKS,
   getActiveNetworkId,
@@ -144,6 +146,9 @@ export default function App() {
   const [inspectForm, setInspectForm] = useState({ xdr: "" });
   const [inspectResult, setInspectResult] = useState(null);
   const [inspectError, setInspectError] = useState(null);
+  const [envelopeXdr, setEnvelopeXdr] = useState("");
+  const [decodedEnvelope, setDecodedEnvelope] = useState(null);
+  const [decodeError, setDecodeError] = useState(null);
   const tabRefs = useRef([]);
   const [accountDetails, setAccountDetails] = useState(null);
   const [failedSubmits, setFailedSubmits] = useState([]);
@@ -1039,6 +1044,17 @@ export default function App() {
       );
     } catch (e) {
       setInspectError(e.message || "XDR could not be read.");
+    }
+  };
+
+  const handleDecodeEnvelope = (event) => {
+    event.preventDefault();
+    setDecodeError(null);
+    setDecodedEnvelope(null);
+    try {
+      setDecodedEnvelope(decodeEnvelope(envelopeXdr, activeNetwork.passphrase));
+    } catch (error) {
+      setDecodeError(error.message || "Could not decode the envelope.");
     }
   };
 
