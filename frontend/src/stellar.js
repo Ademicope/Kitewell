@@ -404,3 +404,55 @@ export async function getTransactions(publicKey, limit = 15, cursor) {
     nextCursor: null,
   };
 }
+
+/**
+ * Load one page of trades for an account.
+ *
+ * @param {string} publicKey Account to page through.
+ * @param {number} [limit] Page size; Horizon caps it at 200 server-side.
+ * @param {string} [cursor] Paging cursor from the previous page; omit for the
+ *   first page.
+ * @returns {Promise<{ records: object[], nextCursor: string|null }>} The
+ *   mapped trade records plus the cursor for the next page (null on the last
+ *   page).
+ */
+export async function getTrades(publicKey, limit = 15, cursor) {
+  if (!publicKey || typeof publicKey !== "string") {
+    throw new Error("Public key is required.");
+  }
+
+  let builder = getServer()
+    .trades()
+    .forAccount(publicKey)
+    .limit(limit)
+    .order("desc");
+
+  if (cursor) {
+    builder = builder.cursor(cursor);
+  }
+
+  const response = await builder.call();
+
+  return {
+    records: response.records.map((trade) => ({
+      id: trade.id,
+      ledger_close_time: trade.ledger_close_time,
+      offer_id: trade.offer_id,
+      base_account: trade.base_account,
+      base_amount: trade.base_amount,
+      base_asset_type: trade.base_asset_type,
+      base_asset_code: trade.base_asset_code,
+      base_asset_issuer: trade.base_asset_issuer,
+      counter_account: trade.counter_account,
+      counter_amount: trade.counter_amount,
+      counter_asset_type: trade.counter_asset_type,
+      counter_asset_code: trade.counter_asset_code,
+      counter_asset_issuer: trade.counter_asset_issuer,
+      price: trade.price,
+      base_is_seller: trade.base_is_seller,
+    })),
+    nextCursor: response.records.length > 0 
+      ? response.records[response.records.length - 1].paging_token 
+      : null,
+  };
+}

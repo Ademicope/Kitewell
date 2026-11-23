@@ -27,6 +27,7 @@ import {
   getAccountDetails,
   getLiquidityPool,
   getTransactions,
+  getTrades,
   explorerAccountUrl,
   explorerTxUrl,
   getAccountAuthConfig,
@@ -60,10 +61,10 @@ const TABS = [
   "Wallet",
   "Fund",
   "Assets",
-  "Issuer",
   "Send",
   "Path",
   "History",
+  "Trades",
   "Inspect",
   "Issuer",
   "Web auth",
@@ -109,6 +110,8 @@ export default function App() {
   const [liquidityPools, setLiquidityPools] = useState({});
   const [transactions, setTransactions] = useState([]);
   const [nextCursor, setNextCursor] = useState(null);
+  const [trades, setTrades] = useState([]);
+  const [tradesNextCursor, setTradesNextCursor] = useState(null);
   const [loading, setLoading] = useState("");
   const [toast, setToast] = useState(null);
   const [sendForm, setSendForm] = useState({
@@ -396,6 +399,7 @@ export default function App() {
     setPublicKey(null);
     setBalances([]);
     setTransactions([]);
+    setTrades([]);
     setAccountDetails(null);
     setIssuerConfig(null);
     setIssuedTrustlines([]);
@@ -408,6 +412,7 @@ export default function App() {
       setNetworkId(id);
       setBalances([]);
       setTransactions([]);
+      setTrades([]);
       setAccountDetails(null);
       setInspectResult(null);
       setInspectError(null);
@@ -704,6 +709,35 @@ export default function App() {
       setNextCursor(page.nextCursor);
     } catch {
       showToast("Could not load older payments.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleTrades = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading("trades");
+    try {
+      const page = await getTrades(publicKey);
+      setTrades(page.records);
+      setTradesNextCursor(page.nextCursor);
+      if (page.records.length === 0) showToast("No trades yet.", "info");
+    } catch (e) {
+      showToast(e.message || "Could not load trades.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleLoadMoreTrades = async () => {
+    if (!publicKey || !tradesNextCursor) return;
+    setLoading("trades-more");
+    try {
+      const page = await getTrades(publicKey, undefined, tradesNextCursor);
+      setTrades((previous) => [...previous, ...page.records]);
+      setTradesNextCursor(page.nextCursor);
+    } catch (e) {
+      showToast(e.message || "Could not load older trades.", "error");
     } finally {
       setLoading("");
     }
@@ -1038,6 +1072,7 @@ export default function App() {
   const activateTab = (tab) => {
     setActiveTab(tab);
     if (tab === "History") handleHistory();
+    if (tab === "Trades") handleTrades();
     if (tab === "Lab") {
       loadLabInfo().then((info) => {
         const contractId = info?.network?.contract?.kitewell;
@@ -3069,6 +3104,94 @@ export default function App() {
                       )}
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "Trades" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Trade history</h2>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={handleTrades}
+                  disabled={loading === "trades" || requireWallet}
+                >
+                  {loading === "trades" ? (
+                    <>
+                      <Spinner /> Loading…
+                    </>
+                  ) : (
+                    "Refresh"
+                  )}
+                </button>
+              </div>
+              <p className="muted">
+                Trades that filled offers on the decentralized exchange. This list is
+                separate from payment history.
+              </p>
+              {trades.length > 0 ? (
+                <div className="tx-list">
+                  {trades.map((trade) => {
+                    const isSeller = trade.base_account === publicKey;
+                    const soldAsset = isSeller
+                      ? trade.base_asset_code || "XLM"
+                      : trade.counter_asset_code || "XLM";
+                    const boughtAsset = isSeller
+                      ? trade.counter_asset_code || "XLM"
+                      : trade.base_asset_code || "XLM";
+                    const soldAmount = isSeller ? trade.base_amount : trade.counter_amount;
+                    const boughtAmount = isSeller ? trade.counter_amount : trade.base_amount;
+                    const price = trade.price?.n && trade.price?.d
+                      ? (parseFloat(trade.price.n) / parseFloat(trade.price.d)).toFixed(7)
+                      : "—";
+                    const tradeTime = formatCreatedAt(trade.ledger_close_time);
+
+                    return (
+                      <div key={trade.id} className="tx-item">
+                        <div className="tx-item__direction">Trade</div>
+                        <div className="tx-item__amount">
+                          Sold {parseFloat(soldAmount).toLocaleString()} {soldAsset}
+                        </div>
+                        <div className="tx-item__amount">
+                          Bought {parseFloat(boughtAmount).toLocaleString()} {boughtAsset}
+                        </div>
+                        <div className="tx-item__addr muted">
+                          Price: {price}
+                        </div>
+                        {tradeTime && (
+                          <time
+                            className="tx-item__time"
+                            dateTime={trade.ledger_close_time}
+                          >
+                            {tradeTime}
+                          </time>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                !loading && <p className="muted">No trades yet.</p>
+              )}
+              {tradesNextCursor && (
+                <div className="section__row">
+                  <button
+                    className="btn btn--secondary"
+                    type="button"
+                    onClick={handleLoadMoreTrades}
+                    disabled={loading === "trades-more"}
+                  >
+                    {loading === "trades-more" ? (
+                      <>
+                        <Spinner /> Loading…
+                      </>
+                    ) : (
+                      "Load more"
+                    )}
+                  </button>
                 </div>
               )}
             </div>
