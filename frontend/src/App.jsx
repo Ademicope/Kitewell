@@ -84,7 +84,17 @@ import {
 import { validateAssetCode } from "./validateAssetCode";
 import { fetchPathQuote, formatPathHops } from "./paths";
 import { decodeTransactionEnvelope } from "./txInspector";
-import TransactionFailureNotice from "./TransactionFailureNotice";
+import TransactionHashLookup from "./TransactionHashLookup";
+import TransactionDetailsPanel from "./TransactionDetails";
+import { completeWebAuthChallenge } from "./sep10WebAuth";
+import { loadIssuerCurrencyList } from "./issuerToml";
+import { createPaymentStreamController } from "./paymentStream";
+import {
+  normaliseTxHash,
+  txStatusPresentation,
+  watchTransactionStatus,
+} from "./txStatusWatch";
+import { buildTransactionExplorerUrl } from "./explorerLink";
 import "./App.css";
 
 const TABS = [
@@ -171,8 +181,7 @@ export default function App() {
   const [pendingTransactions, setPendingTransactions] = useState([]);
   const [pendingError, setPendingError] = useState(null);
   const [nextCursor, setNextCursor] = useState(null);
-  const [trades, setTrades] = useState([]);
-  const [tradesNextCursor, setTradesNextCursor] = useState(null);
+  const [selectedTxHash, setSelectedTxHash] = useState(null);
   const [loading, setLoading] = useState("");
   const [toast, setToast] = useState(null);
   const [transactionFailure, setTransactionFailure] = useState(null);
@@ -6029,18 +6038,46 @@ export default function App() {
               </p>
               {visibleTransactions.length > 0 ? (
                 <div className="tx-list">
-                  {groupPaymentsByDay(visibleTransactions).map((group) => (
-                    <section key={group.day ?? "unknown"} className="tx-day">
-                      <h3 className="tx-day__heading">
-                        {group.day ?? "Unknown"} ({group.records.length})
-                      </h3>
-                      {group.records.map((tx) => {
-                        const isOutgoing = tx.from === publicKey;
-                        const createdAt = formatCreatedAt(tx.created_at);
-                        return (
-                          <div
-                            key={tx.id}
-                            className={`tx-item ${isOutgoing ? "tx-item--out" : "tx-item--in"}`}
+                  {visibleTransactions.map((tx) => {
+                    const isOutgoing = tx.from === publicKey;
+                    const createdAt = formatCreatedAt(tx.created_at);
+                    return (
+                      <div
+                        key={tx.id}
+                        className={`tx-item tx-item--selectable ${isOutgoing ? "tx-item--out" : "tx-item--in"}`}
+                        onClick={() => setSelectedTxHash(tx.transaction_hash)}
+                      >
+                        <div className="tx-item__direction">
+                          {isOutgoing ? "Sent" : "Received"}
+                          <button
+                            className="tx-item__details-btn"
+                            type="button"
+                            aria-pressed={selectedTxHash === tx.transaction_hash}
+                          >
+                            Details
+                          </button>
+                        </div>
+                        <div className="tx-item__amount">
+                          {parseFloat(tx.amount).toLocaleString()} {tx.asset_code || "XLM"}
+                        </div>
+                        <div className="tx-item__addr muted">
+                          {isOutgoing
+                            ? `To ${shortenAddress(tx.to)}`
+                            : `From ${shortenAddress(tx.from)}`}
+                        </div>
+                        <a
+                          href={explorerTxUrl(tx.transaction_hash)}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="tx-item__link"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          Explorer ↗
+                        </a>
+                        {createdAt && (
+                          <time
+                            className="tx-item__time"
+                            dateTime={tx.created_at}
                           >
                             <div className="tx-item__direction">
                               {isOutgoing ? "Sent" : "Received"}
@@ -6077,6 +6114,12 @@ export default function App() {
                 </div>
               ) : (
                 !loading && <p className="muted">No payments yet.</p>
+              )}
+              {selectedTxHash && (
+                <TransactionDetailsPanel
+                  key={`${networkId}:${selectedTxHash}`}
+                  hash={selectedTxHash}
+                />
               )}
               {nextCursor && (
                 <div className="section__row">

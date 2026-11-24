@@ -708,6 +708,30 @@ body {
 .tx-item__addr {
   font-size: 11px;
 }
+.tx-item--selectable {
+  cursor: pointer;
+}
+.tx-item__details-btn {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--info);
+  font: inherit;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.tx-item__details-btn:hover,
+.tx-item__details-btn[aria-pressed="true"] {
+  text-decoration: underline;
+}
+.tx-details__list {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
 .tx-item__link {
   font-size: 11px;
   color: var(--info);
