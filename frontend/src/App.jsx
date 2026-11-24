@@ -78,6 +78,7 @@ import { fetchHealth, fetchLatestHorizonLedger, fetchNetworkInfo } from "./api";
 import { decodeEnvelope, formatArgumentValue } from "./envelopeDecoder";
 import { formatSimulationFee } from "./simulationFees";
 import {
+  NETWORKS,
   getActiveNetwork,
   getActiveNetworkId,
   getAvailableNetworks,
@@ -90,7 +91,7 @@ import { validateAssetCode } from "./validateAssetCode";
 import { fetchPathQuote, formatPathHops } from "./paths";
 import { decodeTransactionEnvelope } from "./txInspector";
 import TransactionHashLookup from "./TransactionHashLookup";
-import TransactionDetailsPanel from "./TransactionDetails";
+import SigningPassphraseConfirmation from "./SigningPassphraseConfirmation";
 import { completeWebAuthChallenge } from "./sep10WebAuth";
 import { loadIssuerCurrencyList } from "./issuerToml";
 import { createPaymentStreamController } from "./paymentStream";
@@ -259,6 +260,7 @@ export default function App() {
   const [pathResult, setPathResult] = useState(null);
   const [pathQuote, setPathQuote] = useState(null);
   const [unsignedEnvelope, setUnsignedEnvelope] = useState(null);
+  const [signingConfirmationOpen, setSigningConfirmationOpen] = useState(false);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
   const [simulationFees, setSimulationFees] = useState(null);
@@ -443,6 +445,7 @@ export default function App() {
   const updateSendForm = (changes) => {
     setSendForm((prev) => ({ ...prev, ...changes }));
     setUnsignedEnvelope(null);
+    setSigningConfirmationOpen(false);
   };
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
   const selectedComposeAsset = balances.find((b) => b.key === composeForm.assetKey);
@@ -883,8 +886,8 @@ export default function App() {
       setTransactions([]);
       setTrades([]);
       setAccountDetails(null);
-      setComposeResult(null);
-      setComposeError(null);
+      setUnsignedEnvelope(null);
+      setSigningConfirmationOpen(false);
       setInspectResult(null);
       setInspectError(null);
       setBaseReserveInStroops(null);
@@ -1257,22 +1260,12 @@ export default function App() {
       return;
     }
 
-    const selected = balances.find((b) => b.key === sendForm.assetKey);
-    if (!selected) {
-      return showToast("Choose an asset you hold a trustline for.", "error");
-    }
-    if (parseFloat(amount) > parseFloat(selected.balance)) {
-      return showToast(
-        `Insufficient ${selected.code} balance. Available: ${selected.balance}.`,
-        "error"
-      );
-    }
+    setSigningConfirmationOpen(true);
+  };
 
-    const asset = selected.isNative
-      ? { isNative: true }
-      : { isNative: false, code: selected.code, issuer: selected.issuer };
-
-    setSendPrepared(null);
+  const handleConfirmedSend = async () => {
+    if (!unsignedEnvelope || !publicKey) return;
+    setSigningConfirmationOpen(false);
     setLoading("send");
     let paymentDestination;
     try {
@@ -4010,19 +4003,75 @@ export default function App() {
                   value={sendForm.memo}
                   onChange={(e) => updateSendForm({ memo: e.target.value })}
                 />
-                <button
-                  className="btn btn--primary"
-                  type="submit"
-                  disabled={loading === "send" || requireWallet}
-                >
-                  {loading === "send" ? (
-                    <>
-                      <Spinner /> Preparing payment…
-                    </>
-                  ) : (
-                    "Review payment"
-                  )}
-                </button>
+                {unsignedEnvelope && (
+                  <div className="info-box">
+                    <span className="eyebrow">Unsigned envelope XDR</span>
+                    <code style={{ wordBreak: "break-all" }}>
+                      {unsignedEnvelope}
+                    </code>
+                    <p className="muted">
+                      Copy this envelope to hand it to another signer or the decoder.
+                      Copying does not sign or submit it.
+                    </p>
+                    <button
+                      className="btn btn--secondary btn--sm"
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(unsignedEnvelope);
+                        showToast(
+                          "Unsigned envelope copied. Nothing was signed or submitted.",
+                          "info"
+                        );
+                      }}
+                    >
+                      Copy XDR
+                    </button>
+                  </div>
+                )}
+                {signingConfirmationOpen && (
+                  <SigningPassphraseConfirmation
+                    network={activeNetwork}
+                    onConfirm={handleConfirmedSend}
+                    onCancel={() => {
+                      setSigningConfirmationOpen(false);
+                      showToast("Signing cancelled. Nothing was signed.", "info");
+                    }}
+                  />
+                )}
+                <div className="section__row">
+                  <button
+                    className="btn btn--secondary"
+                    type="button"
+                    onClick={handlePreviewEnvelope}
+                    disabled={loading === "preview" || requireWallet}
+                  >
+                    {loading === "preview" ? (
+                      <>
+                        <Spinner /> Building…
+                      </>
+                    ) : (
+                      "Build unsigned envelope"
+                    )}
+                  </button>
+                  <button
+                    className="btn btn--primary"
+                    type="submit"
+                    disabled={
+                      loading === "send" ||
+                      loading === "preview" ||
+                      signingConfirmationOpen ||
+                      requireWallet
+                    }
+                  >
+                    {loading === "send" ? (
+                      <>
+                        <Spinner /> Signing in Freighter…
+                      </>
+                    ) : (
+                      "Sign & send"
+                    )}
+                  </button>
+                </div>
               </form>
 
               {sendPrepared && (
