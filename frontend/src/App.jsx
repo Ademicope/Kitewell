@@ -43,7 +43,7 @@ import {
   getLiquidityPool,
   getLatestBaseReserve,
   getTransactions,
-  getFeeStats,
+  streamAccountEffects,
   explorerAccountUrl,
   explorerTxUrl,
   resolveFederationAddress,
@@ -2532,116 +2532,42 @@ export default function App() {
                       </a>
                     </div>
                   )}
-                  {accountDetails?.signers && accountDetails.signers.length > 0 && (
-                    <div className="info-box">
-                      <span className="eyebrow">Signers & thresholds</span>
-                      <p className="muted" style={{ marginBottom: 12 }}>
-                        Tick signers to check if they meet the low, medium, and high thresholds.
-                      </p>
-                      <div style={{ marginBottom: 12 }}>
-                        {accountDetails.signers
-                          .filter((s) => s.weight > 0)
-                          .map((signer) => (
-                            <label
-                              key={signer.key}
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 8,
-                                marginBottom: 8,
-                                cursor: "pointer",
-                              }}
+                  <div className="section">
+                    <h3 className="subhead">Account effects</h3>
+                    <p className="muted">
+                      Trustlines, trades, offers, and account credits/debits stream here while
+                      this panel is open.
+                    </p>
+                    {effectsError && <p className="muted">{effectsError}</p>}
+                    {accountEffects.length > 0 ? (
+                      <ul className="balance-list">
+                        {accountEffects.map((effect, index) => {
+                          const labelled = labelEffect(effect);
+                          return (
+                            <li
+                              key={
+                                effect.paging_token ??
+                                effect.id ??
+                                `${labelled.type}-${index}`
+                              }
+                              className="balance-row"
                             >
-                              <input
-                                type="checkbox"
-                                checked={selectedSigners.includes(signer.key)}
-                                onChange={(e) => {
-                                  if (e.target.checked) {
-                                    setSelectedSigners([...selectedSigners, signer.key]);
-                                  } else {
-                                    setSelectedSigners(
-                                      selectedSigners.filter((k) => k !== signer.key)
-                                    );
-                                  }
-                                }}
-                                style={{ cursor: "pointer" }}
-                              />
-                              <code style={{ flex: 1 }}>{shortenAddress(signer.key)}</code>
-                              <span className="muted">
-                                weight: {signer.weight}
-                                {signer.key === publicKey && " (master)"}
-                              </span>
-                            </label>
-                          ))}
-                      </div>
-                      {(() => {
-                        const thresholds = {
-                          low: accountDetails.thresholds?.low_threshold || 0,
-                          medium: accountDetails.thresholds?.med_threshold || 0,
-                          high: accountDetails.thresholds?.high_threshold || 0,
-                        };
-                        const result = checkThresholds(
-                          accountDetails.signers,
-                          selectedSigners,
-                          thresholds
-                        );
-                        return (
-                          <>
-                            <div style={{ marginBottom: 12 }}>
-                              <div className="metadata-grid">
-                                <div>
-                                  <span className="metadata-label">
-                                    Low ({thresholds.low})
+                              <div>
+                                <strong>{labelled.type}</strong>
+                                {labelled.label && (
+                                  <span className="muted balance-row__issuer">
+                                    {labelled.label}
                                   </span>
-                                  <span
-                                    className="metadata-value"
-                                    style={{ color: result.low ? "#4ade80" : "#f87171" }}
-                                  >
-                                    {result.low ? "✓ Pass" : "✗ Fail"}
-                                  </span>
-                                </div>
-                                <div>
-                                  <span className="metadata-label">
-                                    Medium ({thresholds.medium})
-                                  </span>
-                                  <span
-                                    className="metadata-value"
-                                    style={{ color: result.medium ? "#4ade80" : "#f87171" }}
-                                  >
-                                    {result.medium ? "✓ Pass" : "✗ Fail"}
-                                  </span>
-                                </div>
-                                <div>
-                                  <span className="metadata-label">
-                                    High ({thresholds.high})
-                                  </span>
-                                  <span
-                                    className="metadata-value"
-                                    style={{ color: result.high ? "#4ade80" : "#f87171" }}
-                                  >
-                                    {result.high ? "✓ Pass" : "✗ Fail"}
-                                  </span>
-                                </div>
+                                )}
                               </div>
-                              <div style={{ marginTop: 8 }}>
-                                <span className="metadata-label">Selected weight total</span>
-                                <span className="metadata-value"> {result.totalWeight}</span>
-                              </div>
-                            </div>
-                            {!result.canMeetHigh && (
-                              <div className="info-box info-box--warning" style={{ marginTop: 0 }}>
-                                <span className="eyebrow">⚠ Account locked out</span>
-                                <p className="muted">
-                                  No combination of existing signers can meet the high threshold.
-                                  The account cannot perform high-threshold operations.
-                                </p>
-                              </div>
-                            )}
-                          </>
-                        );
-                      })()}
-                    </div>
-                  )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : (
+                      <p className="muted">No effects yet.</p>
+                    )}
+                  </div>
                   <button className="btn btn--secondary" type="button" onClick={handleDisconnect}>
                     Disconnect
                   </button>
