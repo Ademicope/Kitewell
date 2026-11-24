@@ -42,8 +42,8 @@ import {
   getPendingTransactions,
   getClaimableBalances,
   getLiquidityPool,
-  getAccountOffers,
-  buildManageSellOffer,
+  liquidityPoolDeposit,
+  liquidityPoolWithdraw,
   getTransactions,
   getClaimableBalances,
   explorerAccountUrl,
@@ -98,12 +98,7 @@ const TABS = [
   "Web auth",
   "Muxed",
   "Lab",
-  "Issue",
-];
-const FEE_PERCENTILES = [
-  { key: "mode", label: "Mode" },
-  { key: "p10", label: "p10" },
-  { key: "p99", label: "p99" },
+  "Liquidity",
 ];
 const PENDING_REFRESH_MS = 8000;
 const EVENT_POLL_MS = 6000;
@@ -137,6 +132,18 @@ const MEMO_FIELDS = {
   },
 };
 
+function validatePositivePrice(value, label) {
+  const text = String(value ?? "").trim();
+  if (!/^\d+(?:\.\d+)?$/.test(text)) {
+    throw new Error(`${label} must be a positive decimal.`);
+  }
+  const price = Number(text);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error(`${label} must be greater than zero.`);
+  }
+  return text;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState("Wallet");
   const [publicKey, setPublicKey] = useState(null);
@@ -145,6 +152,17 @@ export default function App() {
   const [balances, setBalances] = useState([]);
   const [claimableBalances, setClaimableBalances] = useState([]);
   const [liquidityPools, setLiquidityPools] = useState({});
+  const [liquidityForm, setLiquidityForm] = useState({
+    poolId: "",
+    mode: "deposit",
+    maxAmountA: "",
+    maxAmountB: "",
+    minPrice: "",
+    maxPrice: "",
+    amount: "",
+    minAmountA: "",
+    minAmountB: "",
+  });
   const [transactions, setTransactions] = useState([]);
   const [pendingTransactions, setPendingTransactions] = useState([]);
   const [pendingError, setPendingError] = useState(null);
@@ -1588,6 +1606,87 @@ export default function App() {
     } catch (err) {
       trackFailedSubmit("manageSellOffer", err);
       showToast(err.message || "Could not cancel offer.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleLiquidity = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+
+    const poolId = liquidityForm.poolId.trim();
+    if (!/^[0-9a-f]{64}$/i.test(poolId)) {
+      return showToast("Pool ID must be 64 hexadecimal characters.", "error");
+    }
+
+    const operationType =
+      liquidityForm.mode === "withdraw"
+        ? "liquidityPoolWithdraw"
+        : "liquidityPoolDeposit";
+    setLoading("liquidity");
+    try {
+      const pool = await getLiquidityPool(poolId);
+      if (!Array.isArray(pool.reserves) || pool.reserves.length !== 2) {
+        throw new Error("Horizon did not return both pool reserves.");
+      }
+      if (pool.reserves[0].asset === pool.reserves[1].asset) {
+        throw new Error("A pair of the same asset is not supported.");
+      }
+
+      let operation;
+      if (liquidityForm.mode === "deposit") {
+        const minPrice = validatePositivePrice(
+          liquidityForm.minPrice,
+          "Minimum price"
+        );
+        const maxPrice = validatePositivePrice(
+          liquidityForm.maxPrice,
+          "Maximum price"
+        );
+        if (Number(minPrice) > Number(maxPrice)) {
+          throw new Error("Minimum price cannot exceed maximum price.");
+        }
+
+        operation = liquidityPoolDeposit(
+          poolId,
+          validatePaymentAmount(liquidityForm.maxAmountA, "Maximum amount A"),
+          validatePaymentAmount(liquidityForm.maxAmountB, "Maximum amount B"),
+          minPrice,
+          maxPrice
+        );
+      } else if (liquidityForm.mode === "withdraw") {
+        operation = liquidityPoolWithdraw(
+          poolId,
+          validatePaymentAmount(liquidityForm.amount, "Share amount"),
+          validatePaymentAmount(liquidityForm.minAmountA, "Minimum amount A"),
+          validatePaymentAmount(liquidityForm.minAmountB, "Minimum amount B")
+        );
+      } else {
+        throw new Error("Choose deposit or withdraw.");
+      }
+
+      const unsignedXdr = await buildUnsignedEnvelope(publicKey, [operation]);
+      const result = await submitEnvelopeWithFreighter(unsignedXdr, publicKey);
+      showToast(
+        `Liquidity ${liquidityForm.mode} submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      startTxWatch(result.hash);
+
+      try {
+        setBalances(await getAccountBalances(publicKey));
+      } catch (refreshError) {
+        showToast(
+          `Transaction submitted, but balances could not refresh: ${refreshError.message}`,
+          "error",
+          explorerTxUrl(result.hash)
+        );
+      }
+    } catch (err) {
+      trackFailedSubmit(operationType, err);
+      showToast(err.message || "Liquidity operation failed.", "error");
     } finally {
       setLoading("");
     }
@@ -5109,103 +5208,183 @@ export default function App() {
             </div>
           )}
 
-          {activeTab === "Claimable" && (
+          {activeTab === "Liquidity" && (
             <div className="section">
               <div className="section__row">
-                <h2>Claimable balances</h2>
-                <button
-                  className="btn btn--secondary"
-                  type="button"
-                  onClick={handleClaimableRefresh}
-                  disabled={loading === "claimable-list" || requireWallet}
-                >
-                  {loading === "claimable-list" ? (
-                    <><Spinner /> Loading…</>
-                  ) : (
-                    "Refresh"
-                  )}
-                </button>
+                <h2>Liquidity Pool</h2>
+                <p className="muted">
+                  Deposit into or withdraw from a constant-product pool.
+                </p>
               </div>
+              <form className="form" onSubmit={handleLiquidity}>
+                <label className="label" htmlFor="liquidity-pool-id">
+                  Pool ID
+                </label>
+                <input
+                  id="liquidity-pool-id"
+                  className="input"
+                  type="text"
+                  maxLength={64}
+                  pattern="[0-9a-fA-F]{64}"
+                  placeholder="64 hexadecimal characters"
+                  value={liquidityForm.poolId}
+                  onChange={(e) =>
+                    setLiquidityForm({
+                      ...liquidityForm,
+                      poolId: e.target.value,
+                    })
+                  }
+                  required
+                />
+                <label className="label" htmlFor="liquidity-mode">
+                  Operation
+                </label>
+                <select
+                  id="liquidity-mode"
+                  className="input"
+                  value={liquidityForm.mode}
+                  onChange={(e) =>
+                    setLiquidityForm({
+                      ...liquidityForm,
+                      mode: e.target.value,
+                    })
+                  }
+                >
+                  <option value="deposit">Deposit</option>
+                  <option value="withdraw">Withdraw</option>
+                </select>
 
-              <form className="form" onSubmit={handleCreateClaimable}>
-                <h3 className="subhead">Create balance</h3>
-                <label className="label" htmlFor="claimable-claimant">
-                  Claimant public key
-                </label>
-                <input
-                  id="claimable-claimant"
-                  className="input"
-                  value={claimableForm.claimant}
-                  onChange={(e) =>
-                    setClaimableForm((prev) => ({ ...prev, claimant: e.target.value }))
-                  }
-                  placeholder="G..."
-                  required
-                />
-                <label className="label" htmlFor="claimable-asset">Asset</label>
-                <select
-                  id="claimable-asset"
-                  className="input"
-                  value={claimableForm.assetKey}
-                  onChange={(e) =>
-                    setClaimableForm((prev) => ({ ...prev, assetKey: e.target.value }))
-                  }
-                >
-                  {assetBalances.map((balance) => (
-                    <option key={balance.key} value={balance.key}>
-                      {balance.code}
-                      {!balance.isNative ? ` · ${shortenAddress(balance.issuer)}` : ""}
-                    </option>
-                  ))}
-                </select>
-                <label className="label" htmlFor="claimable-amount">Amount</label>
-                <input
-                  id="claimable-amount"
-                  className="input"
-                  type="number"
-                  step="0.0000001"
-                  min="0.0000001"
-                  value={claimableForm.amount}
-                  onChange={(e) =>
-                    setClaimableForm((prev) => ({ ...prev, amount: e.target.value }))
-                  }
-                  required
-                />
-                <label className="label" htmlFor="claimable-predicate">
-                  Claim condition
-                </label>
-                <select
-                  id="claimable-predicate"
-                  className="input"
-                  value={claimableForm.predicateMode}
-                  onChange={(e) =>
-                    setClaimableForm((prev) => ({
-                      ...prev,
-                      predicateMode: e.target.value,
-                    }))
-                  }
-                >
-                  <option value="unconditional">Unconditional</option>
-                  <option value="notBefore">Not before ledger time</option>
-                  <option value="notAfter">Not after ledger time</option>
-                </select>
-                {claimableForm.predicateMode !== "unconditional" && (
+                {liquidityForm.mode === "deposit" ? (
                   <>
-                    <label className="label" htmlFor="claimable-ledger-time">
-                      Unix ledger time (seconds)
+                    <p className="muted">
+                      Reserve A/B amounts follow the order returned by Horizon.
+                    </p>
+                    <label className="label" htmlFor="liquidity-max-amount-a">
+                      Maximum amount A
                     </label>
                     <input
-                      id="claimable-ledger-time"
+                      id="liquidity-max-amount-a"
+                      className="input"
+                      type="number"
+                      min="0.0000001"
+                      step="0.0000001"
+                      value={liquidityForm.maxAmountA}
+                      onChange={(e) =>
+                        setLiquidityForm({
+                          ...liquidityForm,
+                          maxAmountA: e.target.value,
+                        })
+                      }
+                      required
+                    />
+                    <label className="label" htmlFor="liquidity-max-amount-b">
+                      Maximum amount B
+                    </label>
+                    <input
+                      id="liquidity-max-amount-b"
+                      className="input"
+                      type="number"
+                      min="0.0000001"
+                      step="0.0000001"
+                      value={liquidityForm.maxAmountB}
+                      onChange={(e) =>
+                        setLiquidityForm({
+                          ...liquidityForm,
+                          maxAmountB: e.target.value,
+                        })
+                      }
+                      required
+                    />
+                    <label className="label" htmlFor="liquidity-min-price">
+                      Minimum price
+                    </label>
+                    <input
+                      id="liquidity-min-price"
                       className="input"
                       type="number"
                       min="0"
-                      step="1"
-                      value={claimableForm.ledgerTime}
+                      step="any"
+                      value={liquidityForm.minPrice}
                       onChange={(e) =>
-                        setClaimableForm((prev) => ({
-                          ...prev,
-                          ledgerTime: e.target.value,
-                        }))
+                        setLiquidityForm({
+                          ...liquidityForm,
+                          minPrice: e.target.value,
+                        })
+                      }
+                      required
+                    />
+                    <label className="label" htmlFor="liquidity-max-price">
+                      Maximum price
+                    </label>
+                    <input
+                      id="liquidity-max-price"
+                      className="input"
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={liquidityForm.maxPrice}
+                      onChange={(e) =>
+                        setLiquidityForm({
+                          ...liquidityForm,
+                          maxPrice: e.target.value,
+                        })
+                      }
+                      required
+                    />
+                  </>
+                ) : (
+                  <>
+                    <label className="label" htmlFor="liquidity-share-amount">
+                      Pool shares to withdraw
+                    </label>
+                    <input
+                      id="liquidity-share-amount"
+                      className="input"
+                      type="number"
+                      min="0.0000001"
+                      step="0.0000001"
+                      value={liquidityForm.amount}
+                      onChange={(e) =>
+                        setLiquidityForm({
+                          ...liquidityForm,
+                          amount: e.target.value,
+                        })
+                      }
+                      required
+                    />
+                    <label className="label" htmlFor="liquidity-min-amount-a">
+                      Minimum amount A out
+                    </label>
+                    <input
+                      id="liquidity-min-amount-a"
+                      className="input"
+                      type="number"
+                      min="0.0000001"
+                      step="0.0000001"
+                      value={liquidityForm.minAmountA}
+                      onChange={(e) =>
+                        setLiquidityForm({
+                          ...liquidityForm,
+                          minAmountA: e.target.value,
+                        })
+                      }
+                      required
+                    />
+                    <label className="label" htmlFor="liquidity-min-amount-b">
+                      Minimum amount B out
+                    </label>
+                    <input
+                      id="liquidity-min-amount-b"
+                      className="input"
+                      type="number"
+                      min="0.0000001"
+                      step="0.0000001"
+                      value={liquidityForm.minAmountB}
+                      onChange={(e) =>
+                        setLiquidityForm({
+                          ...liquidityForm,
+                          minAmountB: e.target.value,
+                        })
                       }
                       required
                     />
@@ -5214,64 +5393,17 @@ export default function App() {
                 <button
                   className="btn btn--primary"
                   type="submit"
-                  disabled={loading === "claimable-create" || requireWallet}
+                  disabled={loading === "liquidity"}
                 >
-                  {loading === "claimable-create" ? (
-                    <><Spinner /> Creating…</>
+                  {loading === "liquidity" ? (
+                    <>
+                      <Spinner /> Submitting…
+                    </>
                   ) : (
-                    "Create claimable balance"
+                    "Sign and submit"
                   )}
                 </button>
               </form>
-
-              {claimableResult && (
-                <div className="info-box">
-                  <span className="eyebrow">
-                    {claimableResult.type === "claimed"
-                      ? "Balance claimed"
-                      : "Balance created"}
-                  </span>
-                  {claimableResult.balanceId && <code>{claimableResult.balanceId}</code>}
-                  <code>{claimableResult.hash}</code>
-                  <a
-                    className="text-link"
-                    href={explorerTxUrl(claimableResult.hash)}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    View transaction on StellarExpert ↗
-                  </a>
-                </div>
-              )}
-
-              {claimableBalances.length > 0 ? (
-                <ul className="balance-list">
-                  {claimableBalances.map((balance) => (
-                    <li className="balance-row" key={balance.id}>
-                      <div>
-                        <strong>{balance.asset}</strong>
-                        <span className="muted balance-row__issuer">
-                          {balance.amount}
-                        </span>
-                      </div>
-                      <button
-                        className="btn btn--secondary btn--sm"
-                        type="button"
-                        onClick={() => handleClaimClaimable(balance)}
-                        disabled={loading === `claimable-${balance.id}`}
-                      >
-                        Claim
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted">
-                  {requireWallet
-                    ? "Connect a wallet to load claimable balances."
-                    : "No claimable balances for this account."}
-                </p>
-              )}
             </div>
           )}
 

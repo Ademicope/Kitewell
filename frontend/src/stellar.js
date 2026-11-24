@@ -865,12 +865,55 @@ export async function getLiquidityPool(poolId) {
   return getServer().liquidityPools().liquidityPoolId(poolId).call();
 }
 
-function mapOrderBookRows(rows = []) {
-  return rows.slice(0, 10).map((row) => ({
-    amount: row.amount,
-    price: row.price,
-    priceR: row.price_r,
-  }));
+function validateLiquidityPoolId(poolId) {
+  if (typeof poolId !== "string" || !/^[0-9a-f]{64}$/i.test(poolId)) {
+    throw new Error("Pool ID must be 64 hexadecimal characters.");
+  }
+  return poolId.toLowerCase();
+}
+
+/**
+ * Build a constant-product liquidity pool deposit operation.
+ *
+ * @param {string} poolId Horizon liquidity-pool id (`hex`).
+ * @param {string} maxAmountA Maximum amount of reserve A to deposit.
+ * @param {string} maxAmountB Maximum amount of reserve B to deposit.
+ * @param {string} minPrice Minimum accepted reserve A/B price.
+ * @param {string} maxPrice Maximum accepted reserve A/B price.
+ * @returns {StellarSdk.xdr.Operation} The liquidity pool deposit operation.
+ */
+export function liquidityPoolDeposit(
+  poolId,
+  maxAmountA,
+  maxAmountB,
+  minPrice,
+  maxPrice
+) {
+  return StellarSdk.Operation.liquidityPoolDeposit({
+    liquidityPoolId: validateLiquidityPoolId(poolId),
+    maxAmountA,
+    maxAmountB,
+    minPrice,
+    maxPrice,
+  });
+}
+
+/**
+ * Build a constant-product liquidity pool withdrawal operation.
+ *
+ * @param {string} poolId Horizon liquidity-pool id (`hex`).
+ * @param {string} amount Pool shares to burn.
+ * @param {string} minAmountA Minimum reserve A to receive.
+ * @param {string} minAmountB Minimum reserve B to receive.
+ * @returns {StellarSdk.xdr.Operation} The liquidity pool withdrawal operation.
+ */
+export function liquidityPoolWithdraw(poolId, amount, minAmountA, minAmountB) {
+  return StellarSdk.Operation.liquidityPoolWithdraw({
+    liquidityPoolId: validateLiquidityPoolId(poolId),
+    amount,
+    minAmountA,
+    minAmountB,
+  });
 }
 
 /**
