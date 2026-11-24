@@ -14,9 +14,12 @@ vi.mock("./api", () => ({
   fetchPaymentsViaApi: vi.fn(),
 }));
 
-const { loadAccountMock, paymentsCallMock } = vi.hoisted(() => ({
+const { loadAccountMock, paymentsCallMock, orderBookCallMock, claimableCallMock, assetCallMock } = vi.hoisted(() => ({
   loadAccountMock: vi.fn(),
   paymentsCallMock: vi.fn(),
+  orderBookCallMock: vi.fn(),
+  claimableCallMock: vi.fn(),
+  assetCallMock: vi.fn(),
 }));
 
 vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
@@ -35,6 +38,17 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
               }),
             }),
           }),
+          orderbook: (selling, buying) => ({
+            limit: () => ({
+              call: () => orderBookCallMock(selling, buying),
+            }),
+          }),
+          claimableBalances: () => ({
+            forSponsor: () => ({ limit: () => ({ call: claimableCallMock }) }),
+          }),
+          assets: () => ({
+            forCode: () => ({ forIssuer: () => ({ call: assetCallMock }) }),
+          }),
         };
       }),
     },
@@ -52,6 +66,7 @@ const {
   getAccountDetails,
   getBalance,
   getTransactions,
+  getOrderBook,
   parsePathAssets,
   withHorizon429Backoff,
   resetHorizon429BackoffForTests,
@@ -77,6 +92,9 @@ function horizonAccountFixture() {
         asset_issuer: "GISSUER",
         balance: "11.0000000",
         limit: "1000.0000000",
+        is_authorized: false,
+        is_authorized_to_maintain_liabilities: true,
+        clawback_enabled: false,
       },
     ],
   };
@@ -86,6 +104,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   loadAccountMock.mockReset();
   paymentsCallMock.mockReset();
+  orderBookCallMock.mockReset();
+  claimableCallMock.mockReset();
+  assetCallMock.mockReset();
   resetHorizon429BackoffForTests();
 });
 
@@ -144,6 +165,62 @@ describe("asset + path helpers", () => {
 
   it("rejects a credit hop without an issuer", () => {
     expect(() => parsePathAssets("USDC")).toThrow(/needs an issuer/);
+  });
+});
+
+describe("getOrderBook", () => {
+  const issuer = StellarSdk.Keypair.random().publicKey();
+
+  it("limits and maps fixture bids and asks", async () => {
+    orderBookCallMock.mockResolvedValue({
+      bids: Array.from({ length: 12 }, (_, index) => ({ amount: `${index + 1}`, price: `${index + 2}` })),
+      asks: [{ amount: "4", price: "1.25" }],
+    });
+
+    await expect(getOrderBook(StellarSdk.Asset.native(), new StellarSdk.Asset("USDC", issuer)))
+      .resolves.toEqual({
+        bids: Array.from({ length: 10 }, (_, index) => ({ amount: `${index + 1}`, price: `${index + 2}`, priceR: undefined })),
+        asks: [{ amount: "4", price: "1.25", priceR: undefined }],
+      });
+    expect(orderBookCallMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a same-asset pair before Horizon", async () => {
+    await expect(getOrderBook(StellarSdk.Asset.native(), StellarSdk.Asset.native()))
+      .rejects.toThrow("Selling and buying assets must be different.");
+    expect(orderBookCallMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves an empty book as empty arrays", async () => {
+    orderBookCallMock.mockResolvedValue({ bids: [], asks: [] });
+    await expect(getOrderBook(StellarSdk.Asset.native(), new StellarSdk.Asset("USDC", issuer)))
+      .resolves.toEqual({ bids: [], asks: [] });
+  });
+});
+
+describe("order book read", () => {
+  const issuer = StellarSdk.Keypair.random().publicKey();
+
+  it("loads the selected selling and buying assets", async () => {
+    const selling = StellarSdk.Asset.native();
+    const buying = new StellarSdk.Asset("USDC", issuer);
+    const fixture = { asks: [{ price: "2", amount: "10" }], bids: [] };
+    orderBookCallMock.mockResolvedValue(fixture);
+
+    await expect(getOrderBook(selling, buying)).resolves.toEqual({
+      asks: [{ ...fixture.asks[0], priceR: undefined }],
+      bids: [],
+    });
+    expect(orderBookCallMock).toHaveBeenCalledWith(selling, buying);
+  });
+
+  it("refuses an invalid pair before calling Horizon", async () => {
+    const native = StellarSdk.Asset.native();
+    await expect(getOrderBook(native, native)).rejects.toThrow(
+      "Selling and buying assets must be different."
+    );
+    await expect(getOrderBook(null, native)).rejects.toThrow(/two different valid assets/);
+    expect(orderBookCallMock).not.toHaveBeenCalled();
   });
 });
 
@@ -221,6 +298,9 @@ describe("balance mapping", () => {
           balance: "11.0000000",
           limit: "1000.0000000",
           isNative: false,
+          isAuthorized: false,
+          isAuthorizedToMaintainLiabilities: true,
+          clawbackEnabled: false,
         },
       ],
     });
@@ -234,6 +314,9 @@ describe("balance mapping", () => {
         balance: "11.0000000",
         limit: "1000.0000000",
         isNative: false,
+        isAuthorized: false,
+        isAuthorizedToMaintainLiabilities: true,
+        clawbackEnabled: false,
       },
     ]);
   });
@@ -261,6 +344,9 @@ describe("balance mapping", () => {
         balance: "11.0000000",
         limit: "1000.0000000",
         isNative: false,
+        isAuthorized: false,
+        isAuthorizedToMaintainLiabilities: true,
+        clawbackEnabled: false,
         sellingLiabilities: "0.0000000",
         buyingLiabilities: "0.0000000",
         available: "11.0000000",
@@ -471,5 +557,49 @@ describe("getTransactions", () => {
       nextCursor: null,
     });
     expect(paymentsCallMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("getClaimableBalances", () => {
+  it("lists only creator balances and enables clawback only for an issuer asset", async () => {
+    const { getClaimableBalances } = await import("./stellar");
+    claimableCallMock.mockResolvedValue({
+      records: [
+        {
+          id: "a".repeat(64),
+          asset: "KITE:GTEST",
+          amount: "4.0000000",
+          sponsor: "GCREATOR",
+          last_modified_time: "2026-01-01T00:00:00Z",
+        },
+        { id: "b".repeat(64), asset: "KITE:GOTHER", amount: "2", sponsor: "OTHER" },
+      ],
+    });
+    assetCallMock.mockResolvedValue({
+      records: [{ flags: { auth_clawback_enabled: true } }],
+    });
+
+    await expect(getClaimableBalances("GCREATOR")).resolves.toEqual([
+      expect.objectContaining({
+        id: "a".repeat(64),
+        code: "KITE",
+        issuer: "GTEST",
+        createdByAccount: true,
+        clawbackEnabled: true,
+      }),
+    ]);
+    expect(claimableCallMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides clawback when the issuer asset does not allow clawback", async () => {
+    const { getClaimableBalances } = await import("./stellar");
+    claimableCallMock.mockResolvedValue({
+      records: [{ id: "c".repeat(64), asset: "KITE:GISSUER", sponsor: "GISSUER" }],
+    });
+    assetCallMock.mockResolvedValue({ records: [{ flags: { auth_clawback_enabled: false } }] });
+
+    await expect(getClaimableBalances("GISSUER")).resolves.toEqual([
+      expect.objectContaining({ clawbackEnabled: false }),
+    ]);
   });
 });
