@@ -36,6 +36,7 @@ import {
 } from "./failedSubmitLog";
 import { copyToClipboardResult } from "./copyToClipboardResult";
 import { shortenAddress } from "./addressFormat";
+import { generateAddressQrCode } from "./addressQr";
 import {
   fundWithFriendbot,
   buildAsset,
@@ -180,6 +181,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("Wallet");
   const [publicKey, setPublicKey] = useState(null);
   const [networkId, setNetworkId] = useState(getActiveNetworkId());
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState(null);
   const [customNetworkForm, setCustomNetworkForm] = useState({
     name: "",
     horizonUrl: "",
@@ -834,6 +836,8 @@ export default function App() {
       const address = await connectFreighterWallet();
       submitGuardRef.current.reset();
       setPublicKey(address);
+      // Generate a scannable QR code for the connected public address.
+      setQrCodeDataUrl(await generateAddressQrCode(address));
       setBalances([]);
       setOpenOffers([]);
       setOfferPrices({});
@@ -870,6 +874,8 @@ export default function App() {
     failedSubmitLogRef.current.clear();
     setFailedSubmits([]);
     setPublicKey(null);
+    setQrCodeDataUrl(null);
+    setQrCodeDataUrl(null);
     setBalances([]);
     setOpenOffers([]);
     setOfferPrices({});
@@ -3046,6 +3052,18 @@ export default function App() {
                   Explorer ↗
                 </a>
               </div>
+              {qrCodeDataUrl && (
+                <div className="qr-code-panel">
+                  <img
+                    className="qr-code-panel__image"
+                    src={qrCodeDataUrl}
+                    alt="QR code for the connected public address"
+                  />
+                  <p className="muted qr-code-panel__hint">
+                    Scan to copy the connected public address.
+                  </p>
+                </div>
+              )}
               {balances.filter((b) => !b.isNative).length > 0 && (
                 <div className="asset-chips">
                   {balances
