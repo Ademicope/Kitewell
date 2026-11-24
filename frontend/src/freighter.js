@@ -603,6 +603,54 @@ export async function pathPaymentWithFreighter({
   return signAndSubmit(transaction, publicKey);
 }
 
+/** Reprice one open offer, keeping its offer id and remaining selling amount. */
+export async function changeOfferPriceWithFreighter(publicKey, offer, newPrice) {
+  if (!offer || !/^[1-9]\d*$/.test(String(offer.id))) {
+    throw new Error("Select an open offer to reprice.");
+  }
+  const price = String(newPrice ?? "").trim();
+  if (!/^\d+(\.\d+)?$/.test(price) || !/[1-9]/.test(price)) {
+    throw new Error("New price must be greater than zero.");
+  }
+
+  // A partial fill may have changed the remaining amount since the list loaded.
+  const currentOffer = await getServer().offers().offer(String(offer.id)).call();
+  if (currentOffer.seller !== publicKey) {
+    throw new Error("This offer is no longer open for the connected account.");
+  }
+
+  const selling = buildAsset({
+    isNative: currentOffer.selling.asset_type === "native",
+    code: currentOffer.selling.asset_code,
+    issuer: currentOffer.selling.asset_issuer,
+  });
+  const buying = buildAsset({
+    isNative: currentOffer.buying.asset_type === "native",
+    code: currentOffer.buying.asset_code,
+    issuer: currentOffer.buying.asset_issuer,
+  });
+  const amount = normalizeAmount(currentOffer.amount, "Remaining offer amount");
+  const operation = StellarSdk.Operation.manageSellOffer({
+    selling,
+    buying,
+    amount,
+    price,
+    offerId: String(offer.id),
+  });
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(operation)
+    .setTimeout(180)
+    .build();
+
+  const result = await signAndSubmit(transaction, publicKey);
+  return { ...result, oldPrice: currentOffer.price };
+}
+
 /**
  * Establish or raise a trustline for a credit asset on Testnet.
  * limit "0" removes the trustline (when balance is zero).
