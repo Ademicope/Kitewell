@@ -373,12 +373,20 @@ export function buildAsset({ isNative, code, issuer } = {}) {
 
 /** Read the public Horizon order book for a validated pair of SDK assets. */
 export async function getOrderBook(selling, buying) {
-  if (!selling || !buying || selling.equals(buying)) {
+  if (!selling || !buying) {
     throw new Error("Choose two different valid assets for the order book.");
   }
-  return withHorizon429Backoff(() =>
-    getServer().orderbook(selling, buying).call()
+  if (selling.equals(buying)) {
+    throw new Error("Selling and buying assets must be different.");
+  }
+
+  const book = await withHorizon429Backoff(() =>
+    getServer().orderbook(selling, buying).limit(10).call()
   );
+  return {
+    bids: mapOrderBookRows(book.bids),
+    asks: mapOrderBookRows(book.asks),
+  };
 }
 
 /**
@@ -653,6 +661,14 @@ export async function getLiquidityPool(poolId) {
   }
 
   return getServer().liquidityPools().liquidityPoolId(poolId).call();
+}
+
+function mapOrderBookRows(rows = []) {
+  return rows.slice(0, 10).map((row) => ({
+    amount: row.amount,
+    price: row.price,
+    priceR: row.price_r,
+  }));
 }
 
 /**

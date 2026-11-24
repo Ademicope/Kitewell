@@ -434,7 +434,7 @@ describe("clawbackClaimableBalanceWithFreighter", () => {
     const [xdr] = signTransactionMock.mock.calls.at(-1);
     const signed = StellarSdk.TransactionBuilder.fromXDR(xdr, StellarSdk.Networks.TESTNET);
     expect(signed.operations[0].type).toBe("clawbackClaimableBalance");
-    expect(signed.operations[0].claimableBalanceId().toString("hex")).toBe("a".repeat(64));
+    expect(signed.operations[0].balanceId).toBe(`00000000${"a".repeat(64)}`);
   });
 
   it("accepts a Horizon id that already includes the type prefix", async () => {
