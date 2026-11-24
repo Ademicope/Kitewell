@@ -54,10 +54,34 @@ const MAX_MEMO_TEXT_BYTES = 28;
 const MAX_U64 = 18446744073709551615n;
 export const TRANSACTION_FEE_STROOPS = StellarSdk.BASE_FEE;
 
-/** Build a spec-driven client for the active network's contract calls. */
-function kitewellClient(contractId) {
-  return createKitewellClient({
-    contractId,
+/** Public Stellar RPC endpoint for Soroban reads + invokes (Testnet). */
+export const SOROBAN_RPC_URL = "https://soroban-testnet.stellar.org";
+const sorobanRpc = new StellarSdk.rpc.Server(SOROBAN_RPC_URL);
+
+/** One event replay read returns at most this many events. */
+export const MAX_KITEWELL_EVENTS = 200;
+
+/** Read-only invokes need a funded-looking source; the zero address works. */
+const ZERO_ADDRESS =
+  "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+const POLL_ATTEMPTS = 15;
+const POLL_INTERVAL_MS = 2000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function scOptionToNative(scVal) {
+  if (!scVal) return null;
+  const native = StellarSdk.scValToNative(scVal);
+  // Option<T> arrives as an empty vec (None) or a one-element vec (Some).
+  return Array.isArray(native) ? (native.length > 0 ? native[0] : null) : native;
+}
+
+function buildContractTx(contract, method, args, sourceAccount, timeout = 60) {
+  return new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
     networkPassphrase: currentPassphrase(),
   });
 }
@@ -215,6 +239,79 @@ export async function readAdminState(contractId) {
   }
 
   return { admin, pendingAdmin };
+}
+
+/** Default page size for the Lab's registered-builder list. */
+export const BUILDER_PAGE_SIZE = 10;
+
+/**
+ * Page through the addresses stored in the contract's builder index and read
+ * each address's nickname.
+ *
+ * The list function is a read-only simulation, so nothing is signed or
+ * submitted. A start past the end comes back as an empty page with
+ * `nextStart: null` instead of an error.
+ *
+ * @param {string} contractId Kitewell contract (C…)
+ * @param {{ start?: number, limit?: number }} [options]
+ * @returns {Promise<{ start: number, limit: number, rows: { address: string, name: string|null }[], nextStart: number|null }>}
+ */
+export async function listKitewellBuilders(
+  contractId,
+  { start = 0, limit = BUILDER_PAGE_SIZE } = {}
+) {
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error(
+      "Contract ID must be a valid Soroban contract strkey (C…)."
+    );
+  }
+
+  const pageStart = Number(start);
+  const pageLimit = Number(limit);
+  if (!Number.isSafeInteger(pageStart) || pageStart < 0) {
+    throw new Error("Builder page start must be zero or a positive index.");
+  }
+  if (!Number.isSafeInteger(pageLimit) || pageLimit <= 0) {
+    throw new Error("Builder page size must be a positive number.");
+  }
+
+  const contract = new StellarSdk.Contract(contractId);
+  const source = new StellarSdk.Account(ZERO_ADDRESS, "0");
+
+  const simulate = async (method, ...args) => {
+    const tx = buildContractTx(contract, method, args, source, 30);
+    const sim = await sorobanRpc.simulateTransaction(tx);
+    if (sim.error) {
+      throw new Error(`${method}() simulation failed: ${sim.error}`);
+    }
+    return sim.result?.retval ?? null;
+  };
+
+  const retval = await simulate(
+    "list_builders",
+    StellarSdk.nativeToScVal(pageStart, { type: "u32" }),
+    StellarSdk.nativeToScVal(pageLimit, { type: "u32" })
+  );
+  const addresses = retval ? StellarSdk.scValToNative(retval) : [];
+
+  // The index only stores addresses; the nickname still comes from
+  // get_builder so the list and the single-builder lookup never disagree.
+  const rows = await Promise.all(
+    (addresses || []).map(async (address) => {
+      const name = await simulate(
+        "get_builder",
+        StellarSdk.nativeToScVal(address, { type: "address" })
+      ).then(scOptionToNative);
+      return { address, name };
+    })
+  );
+
+  return {
+    start: pageStart,
+    limit: pageLimit,
+    rows,
+    nextStart: rows.length === pageLimit ? pageStart + pageLimit : null,
+  };
 }
 
 /**
@@ -1375,8 +1472,148 @@ export async function setAccountOptionsWithFreighter(publicKey, options = {}) {
 async function dryRunPaymentTransaction(transaction) {
   if (typeof fetch !== "function") return;
 
-  const network = getActiveNetwork();
-  if (!network?.horizonUrl) return;
+function eventContractId(event) {
+  const id = event?.contractId;
+  if (!id) return null;
+  if (typeof id === "string") return id;
+  if (typeof id.contractId === "function") return id.contractId();
+  if (typeof id.toString === "function") return id.toString();
+  return String(id);
+}
+
+/**
+ * Turn raw Soroban RPC contract events into the two Lab-facing shapes:
+ * `register` (caller / name / isNew) and `paused` (new flag). Events from any
+ * other contract are dropped, as are event types we do not display.
+ */
+export function mapKitewellEvents(rawEvents = [], contractId) {
+  return (rawEvents || [])
+    .filter((event) => !contractId || eventContractId(event) === contractId)
+    .map((event) => {
+      const topic = event.topic || [];
+      const kind = topic[0] ? nativeOrValue(topic[0]) : null;
+      const value = event.value ? nativeOrValue(event.value) : null;
+      const common = {
+        id: event.id ?? `${event.ledger ?? event.ledgerSeq ?? 0}-${kind}`,
+        ledger: event.ledger ?? event.ledgerSeq ?? null,
+      };
+
+      if (kind === "register") {
+        const [name, isNew] = Array.isArray(value) ? value : [null, null];
+        return {
+          ...common,
+          type: "register",
+          caller: topic[1] ? nativeOrValue(topic[1]) : null,
+          name: name ?? null,
+          isNew: Boolean(isNew),
+        };
+      }
+      if (kind === "paused") {
+        return { ...common, type: "paused", paused: Boolean(value) };
+      }
+      return null;
+    })
+    .filter(Boolean);
+}
+
+/**
+ * Fetch a page of events for the configured contract. With no cursor the tail
+ * starts at `startLedger` (the ledger open at tab-open time), so the full
+ * history is never downloaded.
+ *
+ * A replay read passes its own `startLedger` and is validated against the
+ * latest ledger: a start ledger in the future is refused rather than silently
+ * returning nothing. One read returns at most `MAX_KITEWELL_EVENTS` events.
+ */
+export async function readKitewellEvents(contractId, options = {}) {
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error(
+      "Contract ID must be a valid Soroban contract strkey (C…)."
+    );
+  }
+
+  const { cursor, startLedger, limit = 100 } = options;
+  const pageLimit = Number(limit);
+  if (
+    !Number.isSafeInteger(pageLimit) ||
+    pageLimit < 1 ||
+    pageLimit > MAX_KITEWELL_EVENTS
+  ) {
+    throw new Error(
+      `Event limit must be between 1 and ${MAX_KITEWELL_EVENTS}.`
+    );
+  }
+
+  const request = {
+    limit: pageLimit,
+    filters: [{ type: "contract", contractIds: [contractId] }],
+  };
+  if (cursor) request.cursor = cursor;
+  else {
+    // The latest ledger is needed both to reject a future start and to begin
+    // the live tail at the ledger that is open when the tab opens.
+    const latest = await sorobanRpc.getLatestLedger();
+    const latestSequence = latest?.sequence ?? 0;
+
+    if (startLedger !== undefined && startLedger !== null) {
+      const requestedLedger = Number(startLedger);
+      if (!Number.isSafeInteger(requestedLedger) || requestedLedger <= 0) {
+        throw new Error("Start ledger must be a positive ledger number.");
+      }
+      if (requestedLedger > latestSequence) {
+        throw new Error(
+          `Start ledger ${requestedLedger} is ahead of the latest ledger (${latestSequence}).`
+        );
+      }
+      request.startLedger = requestedLedger;
+    } else {
+      request.startLedger = latestSequence;
+    }
+  }
+
+  const response = await sorobanRpc.getEvents(request);
+
+  return {
+    events: mapKitewellEvents(response.events || [], contractId),
+    cursor: response.cursor ?? null,
+    latestLedger: response.latestLedger ?? null,
+  };
+}
+
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * Read the TTL for a contract instance and its Wasm code from the ledger.
+ *
+ * @param {string} contractId Contract address (C…)
+ * @returns {Promise<{ instanceTTL: number|null, codeTTL: number|null, wasmHash: string|null, currentLedger: number }>}
+ */
+export async function readContractTTL(contractId) {
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error("Contract ID must be a valid Soroban contract strkey (C…).");
+  }
+
+  const contractKey = StellarSdk.xdr.LedgerKey.contractData(
+    new StellarSdk.xdr.LedgerKeyContractData({
+      contract: StellarSdk.Address.fromString(contractId).toScAddress(),
+      key: StellarSdk.xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: StellarSdk.xdr.ContractDataDurability.persistent(),
+    })
+  );
+
+  const ledgerResponse = await sorobanRpc.getLatestLedger();
+  const currentLedger = ledgerResponse.sequence;
+
+  let instanceTTL = null;
+  let codeTTL = null;
+  let wasmHash = null;
 
   try {
     const endpoint = new URL("transactions", `${network.horizonUrl}/`);
@@ -1463,23 +1700,211 @@ export async function preparePaymentWithFreighter(
 
   await dryRunPaymentTransaction(transaction);
 
+  const prepared = await sorobanRpc.prepareTransaction(transaction);
+  const signedTx = await signWithFreighter(prepared.toXDR(), publicKey);
+  const result = await sorobanRpc.sendTransaction(signedTx);
+
+  if (result.status === "ERROR") {
+    throw new Error("Instance TTL extension rejected by the network.");
+  }
+
+  return { hash: result.hash, deadline: extendTo };
+}
+
+/**
+ * Build the one transaction that creates a sponsored account:
+ * `beginSponsoringFutureReserves(newAccount)`, `createAccount(newAccount, 0)`,
+ * then `endSponsoringFutureReserves()`.
+ *
+ * The starting balance is deliberately `0`: the sponsor pays the base reserve,
+ * so the new key does not need any XLM of its own. Building only prepares the
+ * envelope — it never signs and never submits.
+ *
+ * @param {{ sponsor: string, newAccount: string, sequence?: string, timeout?: number }} args
+ * @returns {StellarSdk.Transaction}
+ */
+export function buildSponsoredAccountCreationEnvelope({
+  sponsor,
+  newAccount,
+  sequence = "0",
+  timeout = 180,
+} = {}) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(sponsor)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(newAccount)) {
+    throw new Error("New account must be a valid Stellar public key (G…).");
+  }
+  if (sponsor === newAccount) {
+    throw new Error("Sponsoring the connected account itself is not allowed.");
+  }
+
+  const sourceAccount = new StellarSdk.Account(sponsor, sequence);
+
+  return new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(
+      StellarSdk.Operation.beginSponsoringFutureReserves({
+        sponsoredId: newAccount,
+      })
+    )
+    .addOperation(
+      StellarSdk.Operation.createAccount({
+        destination: newAccount,
+        startingBalance: "0",
+      })
+    )
+    .addOperation(StellarSdk.Operation.endSponsoringFutureReserves())
+    .setTimeout(timeout)
+    .build();
+}
+
+/** True when `publicKey` already signed `transaction`. */
+function hasSignatureFrom(transaction, publicKey) {
+  const hint = StellarSdk.Keypair.fromPublicKey(publicKey)
+    .signatureHint()
+    .toString("hex");
+  return (transaction.signatures || []).some((signature) =>
+    signature.hint().toString("hex") === hint
+  );
+}
+
+/**
+ * Build the unsigned sponsorship envelope for the new account's owner to
+ * co-sign. Nothing is signed or submitted here.
+ *
+ * @returns {Promise<{ xdr: string, hash: string, newAccount: string }>}
+ */
+export async function createSponsoredAccountDraft(publicKey, newAccount) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = buildSponsoredAccountCreationEnvelope({
+    sponsor: publicKey,
+    newAccount,
+    sequence: sourceAccount.sequenceNumber(),
+  });
+
   return {
-    transaction,
-    summary: {
-      destination,
-      amount: amount.toString(),
-      asset: paymentAsset.isNative()
-        ? "XLM (native)"
-        : `${paymentAsset.getCode()} · ${paymentAsset.getIssuer()}`,
-      memo:
-        memoType === "text" && memo
-          ? `Text: ${memo}`
-          : memoType === "id" && memo
-            ? `ID: ${memo}`
-            : memoType === "hash" && memo
-              ? `Hash: ${memo}`
-              : "None",
-      fee: fee.toString(),
-    },
+    xdr: transaction.toXDR(),
+    hash: transaction.hash().toString("hex"),
+    newAccount,
   };
+}
+
+/**
+ * Sponsor the reserve for a brand new account and submit once both signatures
+ * are present: the sponsor's (from Freighter) and the new account's (collected
+ * as a co-signed envelope XDR).
+ *
+ * A missing second signature is refused before anything is signed or sent, and
+ * the co-signed envelope must match this exact sponsorship transaction.
+ *
+ * @returns {Promise<{ hash: string, newAccount: string, sponsor: string, confirmed: boolean }>}
+ */
+export async function sponsorAccountCreationWithFreighter(
+  publicKey,
+  newAccount,
+  coSignedXdr
+) {
+  // Validation only: passing a placeholder sequence keeps this call offline.
+  buildSponsoredAccountCreationEnvelope({
+    sponsor: publicKey,
+    newAccount,
+    sequence: "0",
+  });
+
+  if (!coSignedXdr) {
+    throw new Error(
+      "The new account must co-sign this transaction before it is submitted."
+    );
+  }
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const expected = buildSponsoredAccountCreationEnvelope({
+    sponsor: publicKey,
+    newAccount,
+    sequence: sourceAccount.sequenceNumber(),
+  });
+
+  const coSigned = StellarSdk.TransactionBuilder.fromXDR(
+    coSignedXdr,
+    currentPassphrase()
+  );
+
+  if (coSigned.hash().toString("hex") !== expected.hash().toString("hex")) {
+    throw new Error(
+      "The co-signed envelope does not match this sponsorship transaction."
+    );
+  }
+  if (!hasSignatureFrom(coSigned, newAccount)) {
+    throw new Error(
+      "The co-signed envelope is missing the new account's signature."
+    );
+  }
+
+  const signed = await signWithFreighter(coSignedXdr, publicKey);
+  const result = await getServer().submitTransaction(signed);
+
+  return {
+    hash: result.hash,
+    newAccount,
+    sponsor: publicKey,
+    confirmed: result.successful !== false,
+  };
+}
+
+/**
+ * Extend the code TTL of a Soroban contract's Wasm, separate from the instance.
+ *
+ * @param {string} publicKey Source account
+ * @param {string} wasmHash Hex-encoded Wasm hash
+ * @param {number} extendTo New TTL ledger deadline
+ * @param {number} currentLedger Latest ledger sequence
+ * @returns {Promise<{ hash: string, deadline: number }>}
+ */
+export async function extendCodeTTL(publicKey, wasmHash, extendTo, currentLedger) {
+  if (!wasmHash || !/^[0-9a-fA-F]{64}$/.test(wasmHash)) {
+    throw new Error("Wasm hash must be exactly 64 hexadecimal characters.");
+  }
+
+  if (extendTo <= currentLedger) {
+    throw new Error("TTL deadline must be in the future.");
+  }
+
+  const sourceAccount = await sorobanRpc.getAccount(publicKey);
+  const codeKey = StellarSdk.xdr.LedgerKey.contractCode(
+    new StellarSdk.xdr.LedgerKeyContractCode({
+      hash: hexToBytes(wasmHash),
+    })
+  );
+
+  const sorobanData = new StellarSdk.SorobanDataBuilder().setReadOnly([codeKey]).build();
+
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .setSorobanData(sorobanData)
+    .addOperation(
+      StellarSdk.Operation.extendFootprintTtl({
+        extendTo: extendTo - currentLedger,
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  const prepared = await sorobanRpc.prepareTransaction(transaction);
+  const signedTx = await signWithFreighter(prepared.toXDR(), publicKey);
+  const result = await sorobanRpc.sendTransaction(signedTx);
+
+  if (result.status === "ERROR") {
+    throw new Error("Code TTL extension rejected by the network.");
+  }
+
+  return { hash: result.hash, deadline: extendTo };
 }

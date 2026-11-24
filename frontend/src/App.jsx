@@ -26,6 +26,9 @@ import {
   submitFailureResult,
   signChallengeWithFreighter,
   simulateRegisterBuilder,
+  listKitewellBuilders,
+  createSponsoredAccountDraft,
+  sponsorAccountCreationWithFreighter,
 } from "./freighter";
 import {
   createFailedSubmitLog,
@@ -52,6 +55,7 @@ import {
   getAccountAuthConfig,
   getIssuedAssetTrustlines,
   IMMUTABLE_CONFIRMATION,
+  watchOfferUntilGone,
 } from "./stellar";
 import {
   clearStoredOrderBookPair,
@@ -96,7 +100,7 @@ const TABS = [
   "Decode",
   "Issuer",
   "Web auth",
-  "Muxed",
+  "Offers",
   "Lab",
   "Liquidity",
 ];
@@ -307,14 +311,29 @@ export default function App() {
   const eventCursorRef = useRef(null);
   const eventStartLedgerRef = useRef(null);
 
-  // Lab tab signers/weights/thresholds state
-  const [signers, setSigners] = useState([]);
-  const [signerWeights, setSignerWeights] = useState([]);
-  const [lowThreshold, setLowThreshold] = useState(0);
-  const [medThreshold, setMedThreshold] = useState(0);
-  const [highThreshold, setHighThreshold] = useState(0);
-  const [editingSigner, setEditingSigner] = useState(null);
-  const [editingThreshold, setEditingThreshold] = useState(null);
+  // Replay read: one shot from a chosen ledger, separate from the live tail.
+  const [replayForm, setReplayForm] = useState("");
+  const [replayEvents, setReplayEvents] = useState([]);
+  const [replayError, setReplayError] = useState(null);
+
+  // Paged list of registered builders (contract index).
+  const [builderList, setBuilderList] = useState(null);
+  const [builderListError, setBuilderListError] = useState(null);
+
+  // Sponsored account creation: draft XDR for the new account to co-sign.
+  const [sponsorForm, setSponsorForm] = useState({
+    newAccount: "",
+    coSignedXdr: "",
+  });
+  const [sponsorDraft, setSponsorDraft] = useState(null);
+  const [sponsorResult, setSponsorResult] = useState(null);
+
+  // One offer watch at a time; aborting the controller only stops polling.
+  const [offerForm, setOfferForm] = useState("");
+  const [offerWatch, setOfferWatch] = useState(null);
+  const [offerWatchError, setOfferWatchError] = useState(null);
+  const offerWatchRef = useRef(null);
+  const offerWatchTokenRef = useRef(0);
 
   const showToast = (message, type = "success", explorerUrl = null) => {
     setToast({ message, type, explorerUrl });
@@ -803,6 +822,11 @@ export default function App() {
   const handleNetworkChange = (id) => {
     try {
       cancelHorizonReads();
+      // The watched offer id belongs to the old network's book.
+      offerWatchRef.current?.controller.abort();
+      offerWatchRef.current = null;
+      setOfferWatch(null);
+      setOfferWatchError(null);
       setHorizonNotice(null);
       const next = setActiveNetwork(id);
       submitGuardRef.current.reset();
@@ -2126,6 +2150,320 @@ export default function App() {
     }
   };
 
+  const refreshTtlInfo = async (explicitContractId) => {
+    const contractId = explicitContractId ?? configuredContractId;
+    if (!contractId) {
+      setTtlInfo(null);
+      setTtlError(null);
+      return;
+    }
+    setLoading("ttl");
+    setTtlError(null);
+    try {
+      const info = await readContractInstanceTtl(contractId);
+      setTtlInfo(info);
+      setTtlForm({
+        extendTo: String((info.liveUntilLedgerSeq || info.latestLedger || 0) + 5000),
+      });
+    } catch (err) {
+      setTtlInfo(null);
+      setTtlError(err.message || "Could not read the instance TTL.");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const refreshCodeTtl = useCallback(async () => {
+    if (!configuredContractId) {
+      setCodeTtl(null);
+      setCodeTtlError(null);
+      return;
+    }
+    setLoading("code-ttl");
+    setCodeTtlError(null);
+    try {
+      const ttlData = await readContractTTL(configuredContractId);
+      setCodeTtl(ttlData);
+    } catch (err) {
+      setCodeTtl(null);
+      setCodeTtlError(err.message || "Could not read the contract code TTL.");
+    } finally {
+      setLoading("");
+    }
+  }, [configuredContractId]);
+
+  const handleExtendCodeTtl = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!configuredContractId) {
+      return showToast("No contract id configured.", "error");
+    }
+    if (!codeTtl?.wasmHash || !codeTtl?.currentLedger) {
+      return showToast("Refresh the code TTL first.", "error");
+    }
+
+    const extendTo = codeTtl.currentLedger + 100000;
+    setLoading("extend-code");
+    try {
+      const result = await extendCodeTTL(
+        publicKey,
+        codeTtl.wasmHash,
+        extendTo,
+        codeTtl.currentLedger
+      );
+      showToast(`Code TTL extended to ledger ${result.deadline}.`, "success");
+      await refreshCodeTtl();
+    } catch (err) {
+      showToast(err.message || "Failed to extend code TTL.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleExtendTtl = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!configuredContractId) {
+      return showToast("No contract id configured — deploy first.", "error");
+    }
+    setLoading("ttl-extend");
+    try {
+      const result = await extendContractTtlWithFreighter(
+        publicKey,
+        configuredContractId,
+        ttlForm.extendTo,
+        {
+          currentDeadline: ttlInfo?.liveUntilLedgerSeq ?? undefined,
+          latestLedger: ttlInfo?.latestLedger ?? undefined,
+        }
+      );
+      setTtlResult({
+        hash: result.hash,
+        liveUntilLedgerSeq: result.liveUntilLedgerSeq,
+      });
+      showToast(
+        result.confirmed
+          ? `TTL extended to ledger ${result.liveUntilLedgerSeq}.`
+          : `TTL extension submitted · ${result.hash.slice(0, 12)}…`
+      );
+      await refreshTtlInfo(configuredContractId);
+    } catch (err) {
+      showToast(err.message || "Could not extend the instance TTL.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const pollLabEvents = useCallback(async (contractId) => {
+    if (!contractId) return;
+    try {
+      const result = await readKitewellEvents(contractId, {
+        cursor: eventCursorRef.current || undefined,
+        startLedger: eventStartLedgerRef.current || undefined,
+      });
+      if (eventStartLedgerRef.current === null && result.latestLedger) {
+        eventStartLedgerRef.current = result.latestLedger;
+      }
+      if (result.cursor) eventCursorRef.current = result.cursor;
+      setLabEvents((previous) => {
+        const byId = new Map(previous.map((event) => [event.id, event]));
+        result.events.forEach((event) => byId.set(event.id, event));
+        return [...byId.values()];
+      });
+      setLabEventsError(null);
+    } catch (err) {
+      setLabEventsError(err.message || "Could not read contract events.");
+    }
+  }, []);
+
+  // Start the tail at the ledger open when the Lab tab is first shown, and
+  // poll for new register / pause events while it stays open.
+  useEffect(() => {
+    if (activeTab !== "Lab" || !configuredContractId) {
+      if (activeTab !== "Lab") {
+        eventCursorRef.current = null;
+        eventStartLedgerRef.current = null;
+      }
+      return undefined;
+    }
+    eventCursorRef.current = null;
+    eventStartLedgerRef.current = null;
+    pollLabEvents(configuredContractId);
+    const timer = setInterval(
+      () => pollLabEvents(configuredContractId),
+      EVENT_POLL_MS
+    );
+    return () => clearInterval(timer);
+  }, [activeTab, configuredContractId, pollLabEvents]);
+
+  // Issue #570: a replay read is one shot from the user's start ledger. It
+  // never moves the live tail's cursor or opening ledger.
+  const handleReplayEvents = async (event) => {
+    event.preventDefault();
+    setReplayError(null);
+    setReplayEvents([]);
+
+    if (!configuredContractId) {
+      setReplayError("No contract id configured — nothing to replay.");
+      return;
+    }
+
+    setLoading("replay");
+    try {
+      const result = await readKitewellEvents(configuredContractId, {
+        startLedger: Number(replayForm),
+        limit: 200,
+      });
+      setReplayEvents(result.events);
+      if (result.events.length === 0) {
+        setReplayError("No register or pause events from that ledger yet.");
+      }
+    } catch (err) {
+      setReplayError(err.message || "Could not replay contract events.");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  // Issue #571: page through the contract's builder index. A page past the
+  // end comes back empty, so the panel shows an empty page rather than an error.
+  const loadBuilderPage = useCallback(
+    async (start = 0, explicitContractId) => {
+      const contractId = explicitContractId ?? configuredContractId;
+      if (!contractId) {
+        setBuilderList(null);
+        setBuilderListError(null);
+        return;
+      }
+      setLoading("builders");
+      setBuilderListError(null);
+      try {
+        setBuilderList(await listKitewellBuilders(contractId, { start }));
+      } catch (err) {
+        setBuilderList(null);
+        setBuilderListError(
+          err.message || "Could not read the builder index."
+        );
+      } finally {
+        setLoading("");
+      }
+    },
+    [configuredContractId]
+  );
+
+  // Issue #572: the draft is the unsigned three-op envelope that only the new
+  // account's owner can co-sign. Nothing is submitted until both signatures
+  // are present.
+  const handleBuildSponsorDraft = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setSponsorDraft(null);
+    setSponsorResult(null);
+    setLoading("sponsor-draft");
+    try {
+      const draft = await createSponsoredAccountDraft(
+        publicKey,
+        sponsorForm.newAccount
+      );
+      setSponsorDraft(draft);
+      showToast(
+        "Unsigned sponsorship envelope ready. Have the new account sign it, then paste the signed XDR.",
+        "info"
+      );
+    } catch (err) {
+      showToast(err.message || "Could not build the sponsorship envelope.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleSponsorAccount = async (event) => {
+    event.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!sponsorForm.coSignedXdr.trim()) {
+      return showToast(
+        "The new account must co-sign before this is submitted.",
+        "error"
+      );
+    }
+
+    setLoading("sponsor");
+    setSponsorResult(null);
+    try {
+      const result = await sponsorAccountCreationWithFreighter(
+        publicKey,
+        sponsorForm.newAccount,
+        sponsorForm.coSignedXdr.trim()
+      );
+      setSponsorResult(result);
+      setSponsorForm({ newAccount: "", coSignedXdr: "" });
+      setSponsorDraft(null);
+      showToast(`Sponsored account created · ${result.hash.slice(0, 12)}…`);
+      startTxWatch(result.hash);
+    } catch (err) {
+      trackFailedSubmit("sponsorAccount", err);
+      showToast(err.message || "Sponsored account creation failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  // Issue #541: stopping the watch aborts only the polling loop.
+  const stopOfferWatch = useCallback(() => {
+    offerWatchRef.current?.controller.abort();
+    offerWatchRef.current = null;
+  }, []);
+
+  const handleWatchOffer = async (event) => {
+    event.preventDefault();
+    setOfferWatchError(null);
+    stopOfferWatch();
+
+    const offerId = offerForm.trim();
+    const controller = new AbortController();
+    const token = offerWatchTokenRef.current + 1;
+    offerWatchTokenRef.current = token;
+    offerWatchRef.current = { controller, token };
+    setOfferWatch({ offerId, status: "watching" });
+
+    try {
+      const result = await watchOfferUntilGone(offerId, {
+        publicKey,
+        signal: controller.signal,
+        onUpdate: (offer) => {
+          if (offerWatchTokenRef.current !== token) return;
+          setOfferWatch(
+            offer
+              ? { offerId, status: "open", ...offer }
+              : { offerId, status: "watching" }
+          );
+        },
+      });
+
+      if (offerWatchTokenRef.current !== token) return;
+      if (result.status === "gone") {
+        setOfferWatch({
+          offerId,
+          status: "gone",
+          stillListed: result.stillListed,
+        });
+      } else {
+        setOfferWatch({ offerId, status: "still-open" });
+      }
+    } catch (err) {
+      if (controller.signal.aborted) {
+        setOfferWatch({ offerId, status: "stopped" });
+        return;
+      }
+      setOfferWatch(null);
+      setOfferWatchError(err.message || "Could not watch this offer.");
+    } finally {
+      if (offerWatchRef.current?.token === token) {
+        offerWatchRef.current = null;
+      }
+    }
+  };
+
+  useEffect(() => () => stopOfferWatch(), [stopOfferWatch]);
+
   const handleInspect = (event) => {
     event.preventDefault();
     setInspectError(null);
@@ -2333,9 +2671,12 @@ export default function App() {
     if (tab === "History") handleHistory();
     if (tab === "Trades") handleTrades();
     if (tab === "Lab") {
-      loadLabInfo();
-      checkRpc();
-      refreshLabState();
+      loadLabInfo().then((info) => {
+        const contractId = info?.network?.contract?.kitewell;
+        refreshLabState(contractId);
+        refreshTtlInfo(contractId);
+        loadBuilderPage(0, contractId);
+      });
     }
     if (tab === "Assets") {
       if (publicKey) refreshBalances();
@@ -4264,6 +4605,116 @@ export default function App() {
             </div>
           )}
 
+          {activeTab === "Offers" && (
+            <div className="section">
+              <h2>Watch an offer</h2>
+              <p className="muted">
+                Paste the id returned when an offer was placed. The panel polls the
+                remaining amount and price until the offer leaves the book or you stop
+                watching. Stopping the watch does not cancel the offer.
+              </p>
+
+              <form className="form" onSubmit={handleWatchOffer}>
+                <label className="label" htmlFor="offer-id">
+                  Offer id
+                </label>
+                <input
+                  id="offer-id"
+                  className="input"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]+"
+                  placeholder="e.g. 123456789"
+                  value={offerForm}
+                  onChange={(e) => setOfferForm(e.target.value)}
+                  required
+                />
+                <p className="muted">
+                  Watching only reads the order book. Offer placement and cancellation
+                  stay outside this panel.
+                </p>
+                <div className="section__row">
+                  <button className="btn btn--primary" type="submit">
+                    Watch offer
+                  </button>
+                  {offerWatch &&
+                    (offerWatch.status === "watching" ||
+                      offerWatch.status === "open") && (
+                      <button
+                        className="btn btn--secondary"
+                        type="button"
+                        onClick={stopOfferWatch}
+                      >
+                        Stop watching
+                      </button>
+                    )}
+                </div>
+              </form>
+
+              {offerWatchError && (
+                <div className="info-box info-box--warning" role="alert">
+                  <span className="eyebrow">Offer watch</span>
+                  <p className="muted">{offerWatchError}</p>
+                </div>
+              )}
+
+              {offerWatch && (
+                <div className="info-box" role="status" aria-live="polite">
+                  <span className="eyebrow">Offer {offerWatch.offerId}</span>
+                  {offerWatch.status === "watching" && (
+                    <p className="muted">Waiting for the first poll…</p>
+                  )}
+                  {offerWatch.status === "open" && (
+                    <div className="metadata-grid">
+                      <div>
+                        <span className="metadata-label">Remaining</span>
+                        <span className="metadata-value">{offerWatch.amount}</span>
+                      </div>
+                      <div>
+                        <span className="metadata-label">Price</span>
+                        <span className="metadata-value">{offerWatch.price ?? "—"}</span>
+                      </div>
+                      <div>
+                        <span className="metadata-label">Selling / buying</span>
+                        <span className="metadata-value">
+                          {offerWatch.selling ?? "—"} / {offerWatch.buying ?? "—"}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  {offerWatch.status === "gone" && (
+                    <>
+                      <p className="muted">
+                        The offer is no longer in the book.
+                        {" "}
+                        {offerWatch.stillListed === true
+                          ? "This account still lists it."
+                          : offerWatch.stillListed === false
+                            ? "This account no longer lists it."
+                            : publicKey
+                              ? "Whether the account still lists it could not be read."
+                              : "Connect Freighter to check whether the account still lists it."}
+                      </p>
+                      <p className="muted">
+                        The panel does not guess whether it filled or was cancelled.
+                      </p>
+                    </>
+                  )}
+                  {offerWatch.status === "stopped" && (
+                    <p className="muted">
+                      Watch stopped. The offer was not cancelled.
+                    </p>
+                  )}
+                  {offerWatch.status === "still-open" && (
+                    <p className="muted">
+                      The watch window ended while the offer was still in the book.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {activeTab === "Lab" && (
             <div className="section">
               <div className="section__row">
@@ -4588,70 +5039,89 @@ export default function App() {
                       <p className="muted">{labStateError}</p>
                     </div>
                   )}
-                  {labState?.builder ? (
-                    <form className="form" onSubmit={handleRename}>
-                      <h3 className="subhead">Rename</h3>
-                      <p className="muted" style={{ marginBottom: 12 }}>
-                        Change your registered name without affecting the builder count.
-                      </p>
-                      <label className="label" htmlFor="rename-builder-name">
-                        New builder name
-                      </label>
-                      <input
-                        id="rename-builder-name"
-                        className="input"
-                        maxLength={64}
-                        placeholder={`Currently: ${labState.builder}`}
-                        value={renameForm.name}
-                        onChange={(e) =>
-                          setRenameForm({ ...renameForm, name: e.target.value })
-                        }
-                      />
-                      <button
-                        className="btn btn--primary"
-                        type="submit"
-                        disabled={loading === "rename" || requireWallet}
-                      >
-                        {loading === "rename" ? (
-                          <>
-                            <Spinner /> Signing in Freighter…
-                          </>
-                        ) : (
-                          "Sign & rename"
-                        )}
-                      </button>
-                      {!publicKey && <p className="muted">Connect Freighter to sign.</p>}
-                    </form>
-                  ) : (
-                    <form className="form" onSubmit={handleRegister}>
-                      <label className="label" htmlFor="builder-name">
-                        Builder name
-                      </label>
-                      <input
-                        id="builder-name"
-                        className="input"
-                        maxLength={64}
-                        placeholder="e.g. stellar-alice"
-                        value={registerForm.name}
-                        onChange={(e) =>
-                          setRegisterForm({ ...registerForm, name: e.target.value })
-                        }
-                      />
-                      <button
-                        className="btn btn--primary"
-                        type="submit"
-                        disabled={loading === "register" || requireWallet}
-                      >
-                        {loading === "register" ? (
-                          <>
-                            <Spinner /> Signing in Freighter…
-                          </>
-                        ) : (
-                          "Sign & register"
-                        )}
-                      </button>
-                      {!publicKey && <p className="muted">Connect Freighter to sign.</p>}
-                    </form>
+
+                  <div className="section__row">
+                    <div className="subhead">Registered builders</div>
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      onClick={() => loadBuilderPage(builderList?.start ?? 0)}
+                      disabled={!configuredContractId || loading === "builders"}
+                    >
+                      {loading === "builders" ? (
+                        <>
+                          <Spinner /> Reading…
+                        </>
+                      ) : (
+                        "Refresh"
+                      )}
+                    </button>
+                  </div>
+                  {!configuredContractId && (
+                    <p className="muted">
+                      No contract id configured — no builders to list.
+                    </p>
+                  )}
+                  {builderListError && (
+                    <div className="info-box info-box--warning">
+                      <p className="muted">{builderListError}</p>
+                    </div>
+                  )}
+                  {builderList && configuredContractId && (
+                    <>
+                      {builderList.rows.length > 0 ? (
+                        <ul className="balance-list">
+                          {builderList.rows.map((row) => (
+                            <li key={row.address} className="balance-row">
+                              <div>
+                                <strong>{row.name ?? "—"}</strong>
+                                <span className="muted balance-row__issuer">
+                                  {shortenAddress(row.address)}
+                                </span>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="muted">
+                          {builderList.start > 0
+                            ? "Empty page — no more builders."
+                            : "No builders registered yet."}
+                        </p>
+                      )}
+                      <div className="section__row">
+                        <button
+                          className="btn btn--secondary btn--sm"
+                          type="button"
+                          disabled={
+                            builderList.start === 0 || loading === "builders"
+                          }
+                          onClick={() =>
+                            loadBuilderPage(
+                              Math.max(0, builderList.start - builderList.limit)
+                            )
+                          }
+                        >
+                          Previous
+                        </button>
+                        <span className="muted">
+                          Showing from index {builderList.start}
+                        </span>
+                        <button
+                          className="btn btn--secondary btn--sm"
+                          type="button"
+                          disabled={
+                            builderList.nextStart === null ||
+                            loading === "builders"
+                          }
+                          onClick={() => loadBuilderPage(builderList.nextStart)}
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </>
+                  )}
+
                   <form className="form" onSubmit={handleRegister}>
                     <label className="label" htmlFor="builder-name">
                       Builder name
@@ -4736,6 +5206,123 @@ export default function App() {
                       <code>{lastRegisterTx.hash}</code>
                       <a
                         href={explorerTxUrl(lastRegisterTx.hash)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-link"
+                      >
+                        Explorer ↗
+                      </a>
+                    </div>
+                  )}
+
+                  <div className="subhead">Sponsor a new account</div>
+                  <p className="muted">
+                    Creates the account and its reserve in one transaction:
+                    begin sponsoring, create the account with a starting balance of 0,
+                    then end sponsoring. The new key signs too, so both signatures are
+                    collected before submit.
+                  </p>
+                  <form className="form" onSubmit={handleSponsorAccount}>
+                    <label className="label" htmlFor="sponsor-new-account">
+                      New account public key
+                    </label>
+                    <input
+                      id="sponsor-new-account"
+                      className="input"
+                      type="text"
+                      placeholder="G…"
+                      value={sponsorForm.newAccount}
+                      onChange={(e) => {
+                        setSponsorForm({
+                          ...sponsorForm,
+                          newAccount: e.target.value,
+                        });
+                        setSponsorDraft(null);
+                      }}
+                      required
+                    />
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      onClick={handleBuildSponsorDraft}
+                      disabled={loading === "sponsor-draft" || requireWallet}
+                    >
+                      {loading === "sponsor-draft" ? (
+                        <>
+                          <Spinner /> Building…
+                        </>
+                      ) : (
+                        "Build unsigned envelope"
+                      )}
+                    </button>
+                    {sponsorDraft && (
+                      <div className="info-box">
+                        <span className="eyebrow">Unsigned envelope</span>
+                        <p className="muted">
+                          Have the new account sign this exact XDR, then paste the
+                          signed XDR below. Nothing has been submitted yet.
+                        </p>
+                        <textarea
+                          className="input"
+                          rows={4}
+                          readOnly
+                          spellCheck={false}
+                          value={sponsorDraft.xdr}
+                          onFocus={(e) => e.target.select()}
+                        />
+                        <p className="muted">Hash {sponsorDraft.hash}</p>
+                      </div>
+                    )}
+                    <label className="label" htmlFor="sponsor-cosigned-xdr">
+                      Co-signed envelope (base64 XDR)
+                    </label>
+                    <textarea
+                      id="sponsor-cosigned-xdr"
+                      className="input"
+                      rows={4}
+                      spellCheck={false}
+                      placeholder="Paste the XDR signed by the new account"
+                      value={sponsorForm.coSignedXdr}
+                      onChange={(e) =>
+                        setSponsorForm({
+                          ...sponsorForm,
+                          coSignedXdr: e.target.value,
+                        })
+                      }
+                    />
+                    <p className="muted">
+                      {sponsorForm.coSignedXdr.trim()
+                        ? "The sponsor signs this co-signed envelope in Freighter before it is sent."
+                        : "A missing second signature is never submitted."}
+                    </p>
+                    <button
+                      className="btn btn--primary"
+                      type="submit"
+                      disabled={
+                        loading === "sponsor" ||
+                        requireWallet ||
+                        !sponsorForm.newAccount.trim() ||
+                        !sponsorForm.coSignedXdr.trim()
+                      }
+                    >
+                      {loading === "sponsor" ? (
+                        <>
+                          <Spinner /> Signing in Freighter…
+                        </>
+                      ) : (
+                        "Sign as sponsor & submit"
+                      )}
+                    </button>
+                  </form>
+                  {sponsorResult && (
+                    <div className="info-box">
+                      <span className="eyebrow">Sponsored account</span>
+                      <p className="muted">
+                        New account id: {sponsorResult.newAccount}
+                      </p>
+                      <code>{sponsorResult.hash}</code>
+                      <a
+                        href={explorerTxUrl(sponsorResult.hash)}
                         target="_blank"
                         rel="noreferrer"
                         className="text-link"
@@ -4956,6 +5543,67 @@ export default function App() {
                         No contract events since this tab opened.
                       </p>
                     )
+                  )}
+
+                  <div className="subhead">Replay from a ledger</div>
+                  <p className="muted">
+                    A one-shot read of register and pause events from a start ledger,
+                    up to 200 at a time. The live tail above is left alone.
+                  </p>
+                  <form className="form" onSubmit={handleReplayEvents}>
+                    <label className="label" htmlFor="replay-start-ledger">
+                      Start ledger
+                    </label>
+                    <input
+                      id="replay-start-ledger"
+                      className="input"
+                      type="number"
+                      min="1"
+                      step="1"
+                      placeholder="e.g. 1234567"
+                      value={replayForm}
+                      onChange={(e) => setReplayForm(e.target.value)}
+                      required
+                    />
+                    <button
+                      className="btn btn--primary"
+                      type="submit"
+                      disabled={loading === "replay" || !configuredContractId}
+                    >
+                      {loading === "replay" ? (
+                        <>
+                          <Spinner /> Reading…
+                        </>
+                      ) : (
+                        "Replay events"
+                      )}
+                    </button>
+                  </form>
+                  {replayError && (
+                    <div className="info-box info-box--warning">
+                      <p className="muted">{replayError}</p>
+                    </div>
+                  )}
+                  {replayEvents.length > 0 && (
+                    <ul className="balance-list">
+                      {replayEvents.map((event) => (
+                        <li key={event.id} className="balance-row">
+                          <div>
+                            <strong>{event.type}</strong>
+                            <span className="muted balance-row__issuer">
+                              ledger {event.ledger}
+                            </span>
+                          </div>
+                          <div className="muted">
+                            {event.type === "register"
+                              ? `${event.name ?? "—"} · ${shortenAddress(event.caller)} · ${
+                                  event.isNew ? "new builder" : "existing"
+                                }`
+                              : `paused = ${String(event.paused)}`}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </>
               )}
