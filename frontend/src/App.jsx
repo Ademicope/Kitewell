@@ -31,6 +31,10 @@ import {
   sponsorAccountCreationWithFreighter,
 } from "./freighter";
 import {
+  appendBuilderPage,
+  isBuilderCountMismatch,
+} from "./builderDirectory";
+import {
   createFailedSubmitLog,
   downloadFailedSubmitLog,
 } from "./failedSubmitLog";
@@ -2393,10 +2397,9 @@ export default function App() {
     }
   };
 
-  // Issue #571: page through the contract's builder index. A page past the
-  // end comes back empty, so the panel shows an empty page rather than an error.
+  // Issue #643: append fixed-size pages from the contract's builder index.
   const loadBuilderPage = useCallback(
-    async (start = 0, explicitContractId) => {
+    async (start = 0, explicitContractId, append = false) => {
       const contractId = explicitContractId ?? configuredContractId;
       if (!contractId) {
         setBuilderList(null);
@@ -2406,9 +2409,12 @@ export default function App() {
       setLoading("builders");
       setBuilderListError(null);
       try {
-        setBuilderList(await listKitewellBuilders(contractId, { start }));
+        const page = await listKitewellBuilders(contractId, { start });
+        setBuilderList((previous) =>
+          appendBuilderPage(previous, { ...page, start }, contractId)
+        );
       } catch (err) {
-        setBuilderList(null);
+        if (!append) setBuilderList(null);
         setBuilderListError(
           err.message || "Could not read the builder index."
         );
@@ -5281,7 +5287,7 @@ export default function App() {
                     <button
                       className="btn btn--secondary"
                       type="button"
-                      onClick={() => loadBuilderPage(builderList?.start ?? 0)}
+                      onClick={() => loadBuilderPage(0)}
                       disabled={!configuredContractId || loading === "builders"}
                     >
                       {loading === "builders" ? (
@@ -5305,6 +5311,22 @@ export default function App() {
                   )}
                   {builderList && configuredContractId && (
                     <>
+                      <p className="muted">
+                        Loaded {builderList.rows.length} / builder_count{" "}
+                        {labState?.builderCount ?? "unavailable"}
+                      </p>
+                      {isBuilderCountMismatch(
+                        builderList.rows.length,
+                        labState?.builderCount,
+                        builderList.nextStart
+                      ) && (
+                        <div className="info-box info-box--warning">
+                          <p className="muted">
+                            Count mismatch: loaded {builderList.rows.length} builders,
+                            but the contract reports {labState.builderCount}.
+                          </p>
+                        </div>
+                      )}
                       {builderList.rows.length > 0 ? (
                         <ul className="balance-list">
                           {builderList.rows.map((row) => (
@@ -5325,36 +5347,24 @@ export default function App() {
                             : "No builders registered yet."}
                         </p>
                       )}
-                      <div className="section__row">
-                        <button
-                          className="btn btn--secondary btn--sm"
-                          type="button"
-                          disabled={
-                            builderList.start === 0 || loading === "builders"
-                          }
-                          onClick={() =>
-                            loadBuilderPage(
-                              Math.max(0, builderList.start - builderList.limit)
-                            )
-                          }
-                        >
-                          Previous
-                        </button>
-                        <span className="muted">
-                          Showing from index {builderList.start}
-                        </span>
-                        <button
-                          className="btn btn--secondary btn--sm"
-                          type="button"
-                          disabled={
-                            builderList.nextStart === null ||
-                            loading === "builders"
-                          }
-                          onClick={() => loadBuilderPage(builderList.nextStart)}
-                        >
-                          Next
-                        </button>
-                      </div>
+                      {builderList.nextStart !== null && (
+                        <div className="section__row">
+                          <button
+                            className="btn btn--secondary btn--sm"
+                            type="button"
+                            disabled={loading === "builders"}
+                            onClick={() =>
+                              loadBuilderPage(
+                                builderList.nextStart,
+                                undefined,
+                                true
+                              )
+                            }
+                          >
+                            Load next page
+                          </button>
+                        </div>
+                      )}
                     </>
                   )}
 
