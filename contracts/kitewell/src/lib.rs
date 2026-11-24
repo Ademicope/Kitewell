@@ -1,11 +1,33 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, symbol_short, Address, Env, String,
-    Symbol,
+    Symbol, Vec,
 };
 
 const LAB: Symbol = symbol_short!("KITEWELL");
 const COUNT: Symbol = symbol_short!("COUNT");
+const INDEX: Symbol = symbol_short!("INDEX");
+
+/// Hard cap on one `list_builders` page, so a single read stays small.
+const BUILDER_PAGE_MAX: u32 = 50;
+
+fn read_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&INDEX)
+        .unwrap_or(Vec::new(env))
+}
+
+fn index_position(index: &Vec<Address>, address: &Address) -> Option<u32> {
+    let mut cursor = 0;
+    while cursor < index.len() {
+        if index.get(cursor).as_ref() == Some(address) {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
 const ADMIN: Symbol = symbol_short!("ADMIN");
 const PENDING_ADMIN: Symbol = symbol_short!("PENDING");
 const PAUSED: Symbol = symbol_short!("PAUSED");
@@ -148,6 +170,33 @@ impl Kitewell {
         env.storage().instance().get(&COUNT).unwrap_or(0)
     }
 
+    /// Page through the addresses in the registry index.
+    ///
+    /// The index holds one row per registered builder, in check-in order, so
+    /// the length always matches `builder_count`. `start` past the end returns
+    /// an empty page rather than an error. Pages are capped at
+    /// `BUILDER_PAGE_MAX` entries so a single read cannot grow unbounded.
+    pub fn list_builders(env: Env, start: u32, limit: u32) -> Vec<Address> {
+        let index = read_index(&env);
+        let len = index.len();
+        let mut page = Vec::new(&env);
+
+        if limit == 0 || start >= len {
+            return page;
+        }
+
+        let end = start.saturating_add(limit.min(BUILDER_PAGE_MAX)).min(len);
+        let mut cursor = start;
+        while cursor < end {
+            if let Some(address) = index.get(cursor) {
+                page.push_back(address);
+            }
+            cursor += 1;
+        }
+
+        page
+    }
+
     /// Check in a builder nickname for `caller`. Overwrites previous name.
     ///
     /// Rejects an empty nickname, so a stored builder always has a name.
@@ -177,6 +226,14 @@ impl Kitewell {
             let count: u32 = env.storage().instance().get(&COUNT).unwrap_or(0);
             env.storage().instance().set(&COUNT, &(count + 1));
             env.storage().instance().extend_ttl(1000, 5000);
+
+            // The index carries one row per registered builder. It is only
+            // appended for a first check-in, so a second register for the same
+            // address cannot add a duplicate row.
+            let mut index = read_index(&env);
+            index.push_back(caller.clone());
+            env.storage().persistent().set(&INDEX, &index);
+            env.storage().persistent().extend_ttl(&INDEX, 1000, 5000);
         }
 
         env.storage().persistent().extend_ttl(&key, 1000, 5000);
@@ -213,6 +270,16 @@ impl Kitewell {
             return Err(Error::NotRegistered);
         }
         env.storage().persistent().remove(&key);
+
+        // Drop the caller's row from the index so its length keeps matching
+        // `COUNT`. The entry is known to exist, so a stored index built by
+        // `register` must contain it.
+        let mut index = read_index(&env);
+        if let Some(position) = index_position(&index, &caller) {
+            index.remove(position);
+            env.storage().persistent().set(&INDEX, &index);
+            env.storage().persistent().extend_ttl(&INDEX, 1000, 5000);
+        }
 
         // `COUNT` is only bumped together with a stored entry, so it is at
         // least 1 here; saturating_sub keeps the never-below-zero invariant.

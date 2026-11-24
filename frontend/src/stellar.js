@@ -650,6 +650,109 @@ export function selectPendingTransactions(records) {
  * @param {string} publicKey Connected account.
  * @returns {Promise<object[]>} Pending rows with hash, fee, and sequence.
  */
+/** How often an offer watch re-reads the order book by default. */
+export const OFFER_POLL_INTERVAL_MS = 5000;
+
+function horizonAssetLabel(asset = {}) {
+  if (!asset) return null;
+  if (asset.asset_type === "native") return "XLM";
+  return asset.asset_code ?? null;
+}
+
+/**
+ * Map a Horizon offer record into the fields the watch panel renders. The
+ * remaining `amount` shrinks as the offer fills; `price` is the offered price.
+ */
+export function mapOfferRecord(record) {
+  return {
+    id: String(record.id),
+    seller: record.seller ?? null,
+    amount: record.amount ?? "0",
+    price: record.price ?? null,
+    selling: horizonAssetLabel(record.selling),
+    buying: horizonAssetLabel(record.buying),
+  };
+}
+
+function isOfferGoneError(error) {
+  const status = error?.response?.status ?? error?.status;
+  return status === 404 || error?.name === "NotFoundError";
+}
+
+async function accountStillListsOffer(fetchAccountOffers, publicKey, offerId) {
+  const page = await fetchAccountOffers(publicKey);
+  const records = page?.records ?? page ?? [];
+  return records.some((record) => String(record.id) === String(offerId));
+}
+
+/**
+ * Watch one placed offer until it leaves the order book or the watch stops.
+ *
+ * Each poll reports the current remaining amount and price through `onUpdate`.
+ * A 404 ends the watch with `status: "gone"`; when an account is supplied the
+ * watch then says whether that account still lists the offer id, without
+ * guessing whether the disappearance was a fill or a cancel. Stopping the
+ * watch (abort signal) only stops the polling — it never touches the offer.
+ *
+ * @param {string|number} offerId Horizon offer id
+ * @param {object} [options]
+ * @param {string} [options.publicKey] Account used for the gone check
+ * @param {AbortSignal} [options.signal]
+ * @param {number} [options.intervalMs]
+ * @param {number} [options.maxPolls]
+ * @param {(offer: object) => void} [options.onUpdate]
+ * @returns {Promise<{ status: "gone"|"still-open", stillListed: boolean|null }>}
+ */
+export async function watchOfferUntilGone(offerId, options = {}) {
+  const {
+    publicKey,
+    signal,
+    intervalMs = OFFER_POLL_INTERVAL_MS,
+    maxPolls = 120,
+    onUpdate = () => {},
+    fetchOffer = (id) => getServer().offers().offer(id).call(),
+    fetchAccountOffers = (account) =>
+      getServer().offers().forAccount(account).limit(200).call(),
+    sleep = defaultSleep,
+  } = options;
+
+  if (!/^\d+$/.test(String(offerId ?? "")) || Number(offerId) <= 0) {
+    throw new Error("Offer id must be a positive number.");
+  }
+
+  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+    if (signal?.aborted) throw abortError();
+
+    try {
+      const record = await fetchOffer(offerId);
+      onUpdate(mapOfferRecord(record));
+    } catch (error) {
+      if (!isOfferGoneError(error)) throw error;
+
+      let stillListed = null;
+      if (publicKey) {
+        try {
+          stillListed = await accountStillListsOffer(
+            fetchAccountOffers,
+            publicKey,
+            offerId
+          );
+        } catch {
+          // The gone answer stands even if the account check fails.
+          stillListed = null;
+        }
+      }
+
+      onUpdate(null);
+      return { status: "gone", stillListed };
+    }
+
+    if (attempt < maxPolls - 1) await sleep(intervalMs, signal);
+  }
+
+  return { status: "still-open", stillListed: null };
+}
+
 export async function getPendingTransactions(publicKey, options = {}) {
   return withHorizon429Backoff(async () => {
     const url = `${getActiveNetwork().horizonUrl}/accounts/${encodeURIComponent(

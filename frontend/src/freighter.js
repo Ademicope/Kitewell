@@ -44,6 +44,9 @@ const MAX_U64 = 18446744073709551615n;
 export const SOROBAN_RPC_URL = "https://soroban-testnet.stellar.org";
 const sorobanRpc = new StellarSdk.rpc.Server(SOROBAN_RPC_URL);
 
+/** One event replay read returns at most this many events. */
+export const MAX_KITEWELL_EVENTS = 200;
+
 /** Read-only invokes need a funded-looking source; the zero address works. */
 const ZERO_ADDRESS =
   "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -109,6 +112,79 @@ export async function readKitewellState(contractId, viewerAddress) {
   ]);
 
   return { labName, builderCount, builder };
+}
+
+/** Default page size for the Lab's registered-builder list. */
+export const BUILDER_PAGE_SIZE = 10;
+
+/**
+ * Page through the addresses stored in the contract's builder index and read
+ * each address's nickname.
+ *
+ * The list function is a read-only simulation, so nothing is signed or
+ * submitted. A start past the end comes back as an empty page with
+ * `nextStart: null` instead of an error.
+ *
+ * @param {string} contractId Kitewell contract (C…)
+ * @param {{ start?: number, limit?: number }} [options]
+ * @returns {Promise<{ start: number, limit: number, rows: { address: string, name: string|null }[], nextStart: number|null }>}
+ */
+export async function listKitewellBuilders(
+  contractId,
+  { start = 0, limit = BUILDER_PAGE_SIZE } = {}
+) {
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error(
+      "Contract ID must be a valid Soroban contract strkey (C…)."
+    );
+  }
+
+  const pageStart = Number(start);
+  const pageLimit = Number(limit);
+  if (!Number.isSafeInteger(pageStart) || pageStart < 0) {
+    throw new Error("Builder page start must be zero or a positive index.");
+  }
+  if (!Number.isSafeInteger(pageLimit) || pageLimit <= 0) {
+    throw new Error("Builder page size must be a positive number.");
+  }
+
+  const contract = new StellarSdk.Contract(contractId);
+  const source = new StellarSdk.Account(ZERO_ADDRESS, "0");
+
+  const simulate = async (method, ...args) => {
+    const tx = buildContractTx(contract, method, args, source, 30);
+    const sim = await sorobanRpc.simulateTransaction(tx);
+    if (sim.error) {
+      throw new Error(`${method}() simulation failed: ${sim.error}`);
+    }
+    return sim.result?.retval ?? null;
+  };
+
+  const retval = await simulate(
+    "list_builders",
+    StellarSdk.nativeToScVal(pageStart, { type: "u32" }),
+    StellarSdk.nativeToScVal(pageLimit, { type: "u32" })
+  );
+  const addresses = retval ? StellarSdk.scValToNative(retval) : [];
+
+  // The index only stores addresses; the nickname still comes from
+  // get_builder so the list and the single-builder lookup never disagree.
+  const rows = await Promise.all(
+    (addresses || []).map(async (address) => {
+      const name = await simulate(
+        "get_builder",
+        StellarSdk.nativeToScVal(address, { type: "address" })
+      ).then(scOptionToNative);
+      return { address, name };
+    })
+  );
+
+  return {
+    start: pageStart,
+    limit: pageLimit,
+    rows,
+    nextStart: rows.length === pageLimit ? pageStart + pageLimit : null,
+  };
 }
 
 /**
@@ -903,23 +979,55 @@ export function mapKitewellEvents(rawEvents = [], contractId) {
  * Fetch a page of events for the configured contract. With no cursor the tail
  * starts at `startLedger` (the ledger open at tab-open time), so the full
  * history is never downloaded.
+ *
+ * A replay read passes its own `startLedger` and is validated against the
+ * latest ledger: a start ledger in the future is refused rather than silently
+ * returning nothing. One read returns at most `MAX_KITEWELL_EVENTS` events.
  */
 export async function readKitewellEvents(contractId, options = {}) {
   if (!StellarSdk.StrKey.isValidContract(contractId)) {
-    throw new Error("Contract ID must be a valid Soroban contract strkey (C…).");
+    throw new Error(
+      "Contract ID must be a valid Soroban contract strkey (C…)."
+    );
   }
 
   const { cursor, startLedger, limit = 100 } = options;
+  const pageLimit = Number(limit);
+  if (
+    !Number.isSafeInteger(pageLimit) ||
+    pageLimit < 1 ||
+    pageLimit > MAX_KITEWELL_EVENTS
+  ) {
+    throw new Error(
+      `Event limit must be between 1 and ${MAX_KITEWELL_EVENTS}.`
+    );
+  }
+
   const request = {
-    limit,
+    limit: pageLimit,
     filters: [{ type: "contract", contractIds: [contractId] }],
   };
   if (cursor) request.cursor = cursor;
-  else if (startLedger) request.startLedger = startLedger;
   else {
-    // First open: begin at the latest ledger rather than replaying history.
+    // The latest ledger is needed both to reject a future start and to begin
+    // the live tail at the ledger that is open when the tab opens.
     const latest = await sorobanRpc.getLatestLedger();
-    request.startLedger = latest.sequence;
+    const latestSequence = latest?.sequence ?? 0;
+
+    if (startLedger !== undefined && startLedger !== null) {
+      const requestedLedger = Number(startLedger);
+      if (!Number.isSafeInteger(requestedLedger) || requestedLedger <= 0) {
+        throw new Error("Start ledger must be a positive ledger number.");
+      }
+      if (requestedLedger > latestSequence) {
+        throw new Error(
+          `Start ledger ${requestedLedger} is ahead of the latest ledger (${latestSequence}).`
+        );
+      }
+      request.startLedger = requestedLedger;
+    } else {
+      request.startLedger = latestSequence;
+    }
   }
 
   const response = await sorobanRpc.getEvents(request);
@@ -1056,6 +1164,153 @@ export async function extendInstanceTTL(publicKey, contractId, extendTo) {
   }
 
   return { hash: result.hash, deadline: extendTo };
+}
+
+/**
+ * Build the one transaction that creates a sponsored account:
+ * `beginSponsoringFutureReserves(newAccount)`, `createAccount(newAccount, 0)`,
+ * then `endSponsoringFutureReserves()`.
+ *
+ * The starting balance is deliberately `0`: the sponsor pays the base reserve,
+ * so the new key does not need any XLM of its own. Building only prepares the
+ * envelope — it never signs and never submits.
+ *
+ * @param {{ sponsor: string, newAccount: string, sequence?: string, timeout?: number }} args
+ * @returns {StellarSdk.Transaction}
+ */
+export function buildSponsoredAccountCreationEnvelope({
+  sponsor,
+  newAccount,
+  sequence = "0",
+  timeout = 180,
+} = {}) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(sponsor)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(newAccount)) {
+    throw new Error("New account must be a valid Stellar public key (G…).");
+  }
+  if (sponsor === newAccount) {
+    throw new Error("Sponsoring the connected account itself is not allowed.");
+  }
+
+  const sourceAccount = new StellarSdk.Account(sponsor, sequence);
+
+  return new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(
+      StellarSdk.Operation.beginSponsoringFutureReserves({
+        sponsoredId: newAccount,
+      })
+    )
+    .addOperation(
+      StellarSdk.Operation.createAccount({
+        destination: newAccount,
+        startingBalance: "0",
+      })
+    )
+    .addOperation(StellarSdk.Operation.endSponsoringFutureReserves())
+    .setTimeout(timeout)
+    .build();
+}
+
+/** True when `publicKey` already signed `transaction`. */
+function hasSignatureFrom(transaction, publicKey) {
+  const hint = StellarSdk.Keypair.fromPublicKey(publicKey)
+    .signatureHint()
+    .toString("hex");
+  return (transaction.signatures || []).some((signature) =>
+    signature.hint().toString("hex") === hint
+  );
+}
+
+/**
+ * Build the unsigned sponsorship envelope for the new account's owner to
+ * co-sign. Nothing is signed or submitted here.
+ *
+ * @returns {Promise<{ xdr: string, hash: string, newAccount: string }>}
+ */
+export async function createSponsoredAccountDraft(publicKey, newAccount) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = buildSponsoredAccountCreationEnvelope({
+    sponsor: publicKey,
+    newAccount,
+    sequence: sourceAccount.sequenceNumber(),
+  });
+
+  return {
+    xdr: transaction.toXDR(),
+    hash: transaction.hash().toString("hex"),
+    newAccount,
+  };
+}
+
+/**
+ * Sponsor the reserve for a brand new account and submit once both signatures
+ * are present: the sponsor's (from Freighter) and the new account's (collected
+ * as a co-signed envelope XDR).
+ *
+ * A missing second signature is refused before anything is signed or sent, and
+ * the co-signed envelope must match this exact sponsorship transaction.
+ *
+ * @returns {Promise<{ hash: string, newAccount: string, sponsor: string, confirmed: boolean }>}
+ */
+export async function sponsorAccountCreationWithFreighter(
+  publicKey,
+  newAccount,
+  coSignedXdr
+) {
+  // Validation only: passing a placeholder sequence keeps this call offline.
+  buildSponsoredAccountCreationEnvelope({
+    sponsor: publicKey,
+    newAccount,
+    sequence: "0",
+  });
+
+  if (!coSignedXdr) {
+    throw new Error(
+      "The new account must co-sign this transaction before it is submitted."
+    );
+  }
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const expected = buildSponsoredAccountCreationEnvelope({
+    sponsor: publicKey,
+    newAccount,
+    sequence: sourceAccount.sequenceNumber(),
+  });
+
+  const coSigned = StellarSdk.TransactionBuilder.fromXDR(
+    coSignedXdr,
+    currentPassphrase()
+  );
+
+  if (coSigned.hash().toString("hex") !== expected.hash().toString("hex")) {
+    throw new Error(
+      "The co-signed envelope does not match this sponsorship transaction."
+    );
+  }
+  if (!hasSignatureFrom(coSigned, newAccount)) {
+    throw new Error(
+      "The co-signed envelope is missing the new account's signature."
+    );
+  }
+
+  const signed = await signWithFreighter(coSignedXdr, publicKey);
+  const result = await getServer().submitTransaction(signed);
+
+  return {
+    hash: result.hash,
+    newAccount,
+    sponsor: publicKey,
+    confirmed: result.successful !== false,
+  };
 }
 
 /**
