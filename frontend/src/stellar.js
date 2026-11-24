@@ -370,6 +370,16 @@ export function buildAsset({ isNative, code, issuer } = {}) {
   return new StellarSdk.Asset(normalizedCode.toUpperCase(), issuer);
 }
 
+/** Read the public Horizon order book for a validated pair of SDK assets. */
+export async function getOrderBook(selling, buying) {
+  if (!selling || !buying || selling.equals(buying)) {
+    throw new Error("Choose two different valid assets for the order book.");
+  }
+  return withHorizon429Backoff(() =>
+    getServer().orderbook(selling, buying).call()
+  );
+}
+
 /**
  * Parse a comma-separated intermediate path (e.g. `USDC:G…, XLM`) into SDK
  * Assets. An empty string yields an empty path, which lets Horizon route

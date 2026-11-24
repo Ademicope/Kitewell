@@ -14,9 +14,10 @@ vi.mock("./api", () => ({
   fetchPaymentsViaApi: vi.fn(),
 }));
 
-const { loadAccountMock, paymentsCallMock } = vi.hoisted(() => ({
+const { loadAccountMock, paymentsCallMock, orderBookCallMock } = vi.hoisted(() => ({
   loadAccountMock: vi.fn(),
   paymentsCallMock: vi.fn(),
+  orderBookCallMock: vi.fn(),
 }));
 
 vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
@@ -28,6 +29,9 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
       Server: vi.fn(function () {
         return {
           loadAccount: loadAccountMock,
+          orderbook: (selling, buying) => ({
+            call: () => orderBookCallMock(selling, buying),
+          }),
           payments: () => ({
             forAccount: () => ({
               limit: () => ({
@@ -52,6 +56,7 @@ const {
   getAccountDetails,
   getBalance,
   getTransactions,
+  getOrderBook,
   parsePathAssets,
   withHorizon429Backoff,
   resetHorizon429BackoffForTests,
@@ -86,6 +91,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   loadAccountMock.mockReset();
   paymentsCallMock.mockReset();
+  orderBookCallMock.mockReset();
   resetHorizon429BackoffForTests();
 });
 
@@ -144,6 +150,27 @@ describe("asset + path helpers", () => {
 
   it("rejects a credit hop without an issuer", () => {
     expect(() => parsePathAssets("USDC")).toThrow(/needs an issuer/);
+  });
+});
+
+describe("order book read", () => {
+  const issuer = StellarSdk.Keypair.random().publicKey();
+
+  it("loads the selected selling and buying assets", async () => {
+    const selling = StellarSdk.Asset.native();
+    const buying = new StellarSdk.Asset("USDC", issuer);
+    const fixture = { asks: [{ price: "2", amount: "10" }], bids: [] };
+    orderBookCallMock.mockResolvedValue(fixture);
+
+    await expect(getOrderBook(selling, buying)).resolves.toEqual(fixture);
+    expect(orderBookCallMock).toHaveBeenCalledWith(selling, buying);
+  });
+
+  it("refuses an invalid pair before calling Horizon", async () => {
+    const native = StellarSdk.Asset.native();
+    await expect(getOrderBook(native, native)).rejects.toThrow(/two different valid assets/);
+    await expect(getOrderBook(null, native)).rejects.toThrow(/two different valid assets/);
+    expect(orderBookCallMock).not.toHaveBeenCalled();
   });
 });
 
