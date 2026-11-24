@@ -688,6 +688,74 @@ export function normalizeAmount(value, label = "Amount") {
   return text;
 }
 
+function horizonCreateAccountError(error) {
+  const body = error?.response?.data;
+  if (body?.extras?.result_codes?.operations?.includes("op_already_exist")) {
+    return "Destination account already exists.";
+  }
+  if (body?.extras?.result_codes?.operations?.length) {
+    return body.extras.result_codes.operations.join(", ");
+  }
+  return error?.message || "Create account failed.";
+}
+
+/**
+ * Create and fund a new Stellar account from the connected wallet.
+ */
+export async function createAccountWithFreighter(
+  publicKey,
+  destination,
+  startingBalance
+) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(destination)) {
+    throw new Error("Destination must be a valid Stellar public key (G…).");
+  }
+  if (destination === publicKey) {
+    throw new Error("The destination cannot be the connected account.");
+  }
+
+  const amount = normalizeAmount(startingBalance, "Starting balance");
+  const [whole, fraction = ""] = amount.split(".");
+  const belowMinimum =
+    BigInt(whole) < 1n ||
+    (BigInt(whole) === 0n && !/[1-9]/.test(fraction));
+  if (belowMinimum) {
+    throw new Error("Starting balance must be at least 1 XLM.");
+  }
+  const formattedAmount = `${whole}.${fraction.padEnd(7, "0")}`;
+
+  try {
+    await getServer().loadAccount(destination);
+    throw new Error("Destination account already exists.");
+  } catch (error) {
+    if (error?.message === "Destination account already exists.") throw error;
+    if (error?.response?.status !== 404) throw error;
+  }
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(
+      StellarSdk.Operation.createAccount({
+        destination,
+        startingBalance: formattedAmount,
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  try {
+    return await signAndSubmit(transaction, publicKey);
+  } catch (error) {
+    throw new Error(`Create account failed: ${horizonCreateAccountError(error)}`);
+  }
+}
+
 /**
  * Resolve a UI payment asset descriptor into an SDK Asset.
  * `null` / `{ isNative: true }` is native XLM; a credit asset is

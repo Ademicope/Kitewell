@@ -9,8 +9,7 @@ import {
   pathPaymentWithFreighter,
   changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
-  manageDataWithFreighter,
-  mergeAccountWithFreighter,
+  createAccountWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
   readAdminState,
@@ -220,11 +219,11 @@ export default function App() {
   const tabRefs = useRef([]);
   const horizonAbortRef = useRef(null);
   const [accountDetails, setAccountDetails] = useState(null);
-  const [dataForm, setDataForm] = useState({ name: "", value: "" });
-  const [mergeForm, setMergeForm] = useState({
+  const [createAccountForm, setCreateAccountForm] = useState({
     destination: "",
-    retypeDestination: "",
+    startingBalance: "1",
   });
+  const [createAccountResult, setCreateAccountResult] = useState(null);
   const [failedSubmits, setFailedSubmits] = useState([]);
   const failedSubmitLogRef = useRef(createFailedSubmitLog());
   const [webAuthForm, setWebAuthForm] = useState({ endpoint: "", serverAccount: "" });
@@ -812,21 +811,25 @@ export default function App() {
     e.preventDefault();
     if (!publicKey) return showToast("Connect Freighter first.", "error");
     setLoading("create-account");
+    setCreateAccountResult(null);
     try {
       const result = await createAccountWithFreighter(
         publicKey,
         createAccountForm.destination,
         createAccountForm.startingBalance
       );
-      setCreateAccountForm({ destination: "", startingBalance: "" });
+      setCreateAccountResult({
+        destination: createAccountForm.destination,
+        hash: result.hash,
+      });
       await refreshBalances();
       showToast(
         `Account created · ${result.hash.slice(0, 12)}…`,
         "success",
         explorerTxUrl(result.hash)
       );
-    } catch (error) {
-      showToast(error.message || "Account creation failed.", "error");
+    } catch (err) {
+      showToast(err.message || "Create account failed.", "error");
     } finally {
       setLoading("");
     }
@@ -2846,165 +2849,70 @@ export default function App() {
               <form className="form" onSubmit={handleCreateAccount}>
                 <h3 className="subhead">Create account from this wallet</h3>
                 <p className="muted">
-                  Create a Stellar account by sending XLM from your connected
-                  account. This is separate from Friendbot funding.
+                  Create and fund a new Stellar account using XLM from the connected wallet.
                 </p>
-                <label className="label" htmlFor="create-account-destination">
-                  New account address
+                <label className="label" htmlFor="create-account-key">
+                  New account public key
                 </label>
                 <input
-                  id="create-account-destination"
+                  id="create-account-key"
                   className="input"
                   value={createAccountForm.destination}
-                  onChange={(event) =>
-                    setCreateAccountForm({
-                      ...createAccountForm,
-                      destination: event.target.value,
-                    })
+                  onChange={(e) =>
+                    setCreateAccountForm((prev) => ({
+                      ...prev,
+                      destination: e.target.value,
+                    }))
                   }
-                  placeholder="G…"
+                  placeholder="G..."
                   required
                 />
-                <label className="label" htmlFor="create-account-amount">
-                  Starting balance (XLM)
+                <label className="label" htmlFor="create-account-balance">
+                  Starting XLM balance
                 </label>
                 <input
-                  id="create-account-amount"
+                  id="create-account-balance"
                   className="input"
                   type="number"
-                  min="0.0000001"
+                  min="1"
                   step="0.0000001"
                   value={createAccountForm.startingBalance}
-                  onChange={(event) =>
-                    setCreateAccountForm({
-                      ...createAccountForm,
-                      startingBalance: event.target.value,
-                    })
+                  onChange={(e) =>
+                    setCreateAccountForm((prev) => ({
+                      ...prev,
+                      startingBalance: e.target.value,
+                    }))
                   }
                   required
                 />
-                <div className="info-box" aria-live="polite">
-                  <span className="eyebrow">Source account reserve check</span>
-                  <span>Source balance: {xlmBalance ?? "—"} XLM</span>
-                  <span>
-                    Amount: {createAccountForm.startingBalance || "—"} XLM
-                  </span>
-                  <span>Transaction fee: {transactionFee} XLM</span>
-                  <span>
-                    Source minimum:{" "}
-                    {sourceMinimumStroops == null
-                      ? "—"
-                      : `${formatStroops(sourceMinimumStroops)} XLM`}
-                  </span>
-                  {baseReserveInStroops == null ? (
-                    <p className="muted">
-                      {reserveError ||
-                        "Load the latest ledger before checking account creation."}
-                    </p>
-                  ) : !accountDetails ? (
-                    <p className="muted">
-                      Connect and load the source account to check its minimum.
-                    </p>
-                  ) : createAccountCheckError ? (
-                    <p className="muted">{createAccountCheckError}</p>
-                  ) : !createAccountForm.startingBalance ? (
-                    <p className="muted">Enter a starting balance to run the check.</p>
-                  ) : (
-                    <strong>
-                      {createAccountAffordable && createAccountDestinationAffordable
-                        ? "Source remains above its minimum; starting balance covers the new account minimum."
-                        : "This amount does not satisfy the source or new-account minimum."}
-                    </strong>
-                  )}
-                </div>
                 <button
                   className="btn btn--primary"
                   type="submit"
-                  disabled={
-                    loading === "create-account" ||
-                    requireWallet ||
-                    !accountDetails ||
-                    baseReserveInStroops == null ||
-                    !createAccountAffordable ||
-                    !createAccountDestinationAffordable
-                  }
+                  disabled={loading === "create-account" || requireWallet}
                 >
                   {loading === "create-account" ? (
                     <>
                       <Spinner /> Creating…
                     </>
                   ) : (
-                    "Sign create-account"
+                    "Create and fund account"
                   )}
                 </button>
               </form>
-            </div>
-          )}
-
-          {activeTab === "Offers" && (
-            <div className="section">
-              <div className="section__row">
-                <h2>Open offers</h2>
-                <button
-                  className="btn btn--secondary"
-                  type="button"
-                  onClick={() => setOfferRefresh((count) => count + 1)}
-                  disabled={offerLoading || loading === "offer" || requireWallet}
-                >
-                  Refresh
-                </button>
-              </div>
-              <p className="muted">
-                Change the price of one offer. Its remaining amount and offer ID stay the same.
-              </p>
-              {requireWallet ? (
-                <p className="muted">Connect Freighter to view your offers.</p>
-              ) : offerLoading ? (
-                <p className="muted" role="status">Loading open offers…</p>
-              ) : offerError ? (
-                <p className="muted" role="alert">{offerError}</p>
-              ) : openOffers.length === 0 ? (
-                <p className="muted">No open offers on this network.</p>
-              ) : (
-                <ul className="balance-list">
-                  {openOffers.map((offer) => (
-                    <li key={offer.id} className="balance-row offer-row">
-                      <strong>
-                        {offer.selling.asset_code || "XLM"} → {offer.buying.asset_code || "XLM"}
-                      </strong>
-                      <span className="muted">Offer #{offer.id} · Remaining {offer.amount} {offer.selling.asset_code || "XLM"}</span>
-                      <form className="form" onSubmit={(event) => handleOfferPriceChange(event, offer)}>
-                        <label className="label" htmlFor={`offer-price-${offer.id}`}>
-                          New price ({offer.buying.asset_code || "XLM"} per {offer.selling.asset_code || "XLM"})
-                        </label>
-                        <input
-                          id={`offer-price-${offer.id}`}
-                          className="input"
-                          type="text"
-                          inputMode="decimal"
-                          required
-                          value={offerPrices[offer.id] || ""}
-                          onChange={(event) => setOfferPrices((previous) => ({ ...previous, [offer.id]: event.target.value }))}
-                        />
-                        <span className="muted">Current price: {offer.price} → New price: {offerPrices[offer.id] || "—"}</span>
-                        <button className="btn btn--primary" type="submit" disabled={loading === "offer" || offerLoading}>
-                          {loading === "offer" ? "Signing…" : "Sign price change"}
-                        </button>
-                      </form>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {offerResult && (
-                <div className="info-box" role="status">
-                  <span className="eyebrow">Offer #{offerResult.id} price change submitted</span>
-                  <p>Old price: {offerResult.oldPrice} → New price: {offerResult.newPrice}</p>
-                  <a className="text-link" href={explorerTxUrl(offerResult.hash)} target="_blank" rel="noreferrer">
-                    View transaction ↗
+              {createAccountResult && (
+                <div className="info-box">
+                  <span className="eyebrow">Funding submitted</span>
+                  <code>{createAccountResult.hash}</code>
+                  <a
+                    className="text-link"
+                    href={explorerAccountUrl(createAccountResult.destination)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    View new account on StellarExpert ↗
                   </a>
                 </div>
               )}
-              {txWatchPanel}
             </div>
           )}
 
