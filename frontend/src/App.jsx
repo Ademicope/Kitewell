@@ -64,6 +64,7 @@ import { decodeEnvelope, formatArgumentValue } from "./envelopeDecoder";
 import { formatSimulationFee } from "./simulationFees";
 import {
   NETWORKS,
+  getActiveNetwork,
   getActiveNetworkId,
   isFriendbotAvailable,
   setActiveNetwork,
@@ -72,6 +73,7 @@ import { validateAssetCode } from "./validateAssetCode";
 import { checkThresholds } from "./thresholdCheck";
 import { decodeTransactionEnvelope } from "./txInspector";
 import TransactionHashLookup from "./TransactionHashLookup";
+import SigningPassphraseConfirmation from "./SigningPassphraseConfirmation";
 import { completeWebAuthChallenge } from "./sep10WebAuth";
 import { loadIssuerCurrencyList } from "./issuerToml";
 import { createPaymentStreamController } from "./paymentStream";
@@ -198,6 +200,7 @@ export default function App() {
   const [bookResult, setBookResult] = useState(null);
   const bookClearGenerationRef = useRef(0);
   const [unsignedEnvelope, setUnsignedEnvelope] = useState(null);
+  const [signingConfirmationOpen, setSigningConfirmationOpen] = useState(false);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
   const [simulationFees, setSimulationFees] = useState(null);
@@ -313,7 +316,7 @@ export default function App() {
   const assetBalances = balances.filter((b) => !b.isPoolShare);
   const poolShares = poolShareRows(balances, liquidityPools);
   const memoField = MEMO_FIELDS[sendForm.memoType];
-  const activeNetwork = NETWORKS[networkId];
+  const activeNetwork = getActiveNetwork();
   const friendbotAvailable = isFriendbotAvailable();
   const pathModeField = PATH_MODE_FIELDS[pathForm.mode];
   const updatePathForm = (changes) => setPathForm((prev) => ({ ...prev, ...changes }));
@@ -322,6 +325,7 @@ export default function App() {
   const updateSendForm = (changes) => {
     setSendForm((prev) => ({ ...prev, ...changes }));
     setUnsignedEnvelope(null);
+    setSigningConfirmationOpen(false);
   };
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
   const muxedSendBase = (() => {
@@ -619,6 +623,8 @@ export default function App() {
       setPendingTransactions([]);
       setPendingError(null);
       setAccountDetails(null);
+      setUnsignedEnvelope(null);
+      setSigningConfirmationOpen(false);
       setInspectResult(null);
       setInspectError(null);
       showToast(`Switched to ${next.label}. Refresh to load balances.`, "info");
@@ -933,6 +939,12 @@ export default function App() {
       return;
     }
 
+    setSigningConfirmationOpen(true);
+  };
+
+  const handleConfirmedSend = async () => {
+    if (!unsignedEnvelope || !publicKey) return;
+    setSigningConfirmationOpen(false);
     setLoading("send");
     try {
       const result = await submitEnvelopeWithFreighter(
@@ -2723,6 +2735,16 @@ export default function App() {
                     </button>
                   </div>
                 )}
+                {signingConfirmationOpen && (
+                  <SigningPassphraseConfirmation
+                    network={activeNetwork}
+                    onConfirm={handleConfirmedSend}
+                    onCancel={() => {
+                      setSigningConfirmationOpen(false);
+                      showToast("Signing cancelled. Nothing was signed.", "info");
+                    }}
+                  />
+                )}
                 <div className="section__row">
                   <button
                     className="btn btn--secondary"
@@ -2741,7 +2763,12 @@ export default function App() {
                   <button
                     className="btn btn--primary"
                     type="submit"
-                    disabled={loading === "send" || loading === "preview" || requireWallet}
+                    disabled={
+                      loading === "send" ||
+                      loading === "preview" ||
+                      signingConfirmationOpen ||
+                      requireWallet
+                    }
                   >
                     {loading === "send" ? (
                       <>
