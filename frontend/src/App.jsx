@@ -12,7 +12,17 @@ import {
   clawbackClaimableBalanceWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
-  parseSep7PayUri,
+  restoreContractWithFreighter,
+  setAccountOptionsWithFreighter,
+  allowTrustWithFreighter,
+  readContractInstanceTtl,
+  extendContractTtlWithFreighter,
+  readContractTTL,
+  extendCodeTTL,
+  readKitewellEvents,
+  submitFailureResult,
+  signChallengeWithFreighter,
+  simulateRegisterBuilder,
 } from "./freighter";
 import {
   createFailedSubmitLog,
@@ -1619,6 +1629,31 @@ export default function App() {
     }
   };
 
+  const handleRestore = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    const contractId = labInfo?.network?.contract?.kitewell;
+    if (!contractId) {
+      return showToast(
+        "No contract id configured — deploy first (contracts/README.md).",
+        "error"
+      );
+    }
+    setLoading("restore");
+    try {
+      const result = await restoreContractWithFreighter(publicKey, contractId);
+      showToast(
+        result.confirmed
+          ? `Contract restored · ${result.hash.slice(0, 12)}…`
+          : `Restore submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      // Refresh the contract state after restore
+      await refreshLabState();
+    } catch (err) {
+      showToast(err.message || "Restore operation failed.", "error");
+    } finally {
+      setLoading("");
   const refreshIssuerPanel = async () => {
     if (!publicKey) return;
     setLoading("issuer");
@@ -4316,73 +4351,65 @@ export default function App() {
                       Reads lab_name, builder_count, and get_builder via Soroban RPC.
                     </p>
                   )}
+                  {labState?.archived && (
+                    <div className="info-box info-box--warning">
+                      <span className="eyebrow">⚠ Contract archived</span>
+                      <p className="muted" style={{ marginBottom: 12 }}>
+                        The contract entry has expired and needs to be restored before it can be read or invoked again.
+                      </p>
+                      <button
+                        className="btn btn--primary"
+                        type="button"
+                        onClick={handleRestore}
+                        disabled={loading === "restore" || !publicKey}
+                      >
+                        {loading === "restore" ? (
+                          <>
+                            <Spinner /> Restoring…
+                          </>
+                        ) : (
+                          "Restore contract"
+                        )}
+                      </button>
+                      {!publicKey && <p className="muted" style={{ marginTop: 8 }}>Connect Freighter to restore.</p>}
+                    </div>
+                  )}
                   {labStateError && (
                     <div className="info-box info-box--warning">
                       <span className="eyebrow">Contract state</span>
                       <p className="muted">{labStateError}</p>
                     </div>
                   )}
-                  {labState?.paused && (
-                    <div className="info-box info-box--warning">
-                      <span className="eyebrow">Registration paused</span>
-                      <p className="muted">
-                        The admin paused check-ins. Registering now is rejected by the
-                        contract with a paused error; unpause to resume.
-                      </p>
-                    </div>
-                  )}
-                  <div className="section__row">
-                    <div className="subhead">Contract controls</div>
-                    <button
-                      className="btn btn--secondary"
-                      type="button"
-                      onClick={handleTogglePause}
-                      disabled={loading === "pause" || requireWallet}
-                    >
-                      {loading === "pause" ? (
-                        <>
-                          <Spinner /> Signing in Freighter…
-                        </>
-                      ) : labState?.paused ? (
-                        "Unpause registration"
-                      ) : (
-                        "Pause registration"
-                      )}
-                    </button>
-                    {publicKey && labState?.builder && (
+                  {!labState?.archived && (
+                    <form className="form" onSubmit={handleRegister}>
+                      <label className="label" htmlFor="builder-name">
+                        Builder name
+                      </label>
+                      <input
+                        id="builder-name"
+                        className="input"
+                        maxLength={64}
+                        placeholder="e.g. stellar-alice"
+                        value={registerForm.name}
+                        onChange={(e) =>
+                          setRegisterForm({ ...registerForm, name: e.target.value })
+                        }
+                      />
                       <button
-                        className="btn btn--secondary"
-                        type="button"
-                        onClick={handleUnregister}
-                        disabled={loading === "unregister"}
+                        className="btn btn--primary"
+                        type="submit"
+                        disabled={loading === "register" || requireWallet}
                       >
-                        {loading === "unregister" ? (
+                        {loading === "register" ? (
                           <>
                             <Spinner /> Signing in Freighter…
                           </>
                         ) : (
-                          "Unregister me"
+                          "Sign & register"
                         )}
                       </button>
-                    )}
-                  </div>
-                  {!publicKey && (
-                    <p className="muted">Connect Freighter to pause or unregister.</p>
-                  )}
-                  {lastLabTx && (
-                    <div className="info-box">
-                      <span className="eyebrow">Last contract tx</span>
-                      <code>{lastLabTx.hash}</code>
-                      <a
-                        href={explorerTxUrl(lastLabTx.hash)}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-link"
-                      >
-                        Explorer ↗
-                      </a>
-                    </div>
-                  )}
+                      {!publicKey && <p className="muted">Connect Freighter to sign.</p>}
+                    </form>
                   <form className="form" onSubmit={handleRegister}>
                     <label className="label" htmlFor="builder-name">
                       Builder name
