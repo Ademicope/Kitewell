@@ -66,6 +66,7 @@ describe("Futurenet account balances", () => {
     fetchAccountViaApi.mockRejectedValue(new Error("backend down"));
     loadAccountMock.mockResolvedValue({
       balances: [{ asset_type: "native", balance: "3.5000000" }],
+      subentry_count: 0,
     });
 
     await expect(getAccountBalances("GTEST")).resolves.toEqual([
@@ -76,6 +77,9 @@ describe("Futurenet account balances", () => {
         balance: "3.5000000",
         limit: null,
         isNative: true,
+        sellingLiabilities: "0.0000000",
+        buyingLiabilities: "0.0000000",
+        available: "2.5000000", // 3.5 - (0.5 * (2 + 0)) = 2.5
       },
     ]);
     expect(loadAccountMock).toHaveBeenCalledWith("GTEST");
