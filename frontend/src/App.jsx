@@ -18,7 +18,6 @@ import {
   readKitewellEvents,
   submitFailureResult,
   signChallengeWithFreighter,
-  simulateRegisterBuilder,
 } from "./freighter";
 import {
   createFailedSubmitLog,
@@ -162,8 +161,6 @@ export default function App() {
   const [envelopeXdr, setEnvelopeXdr] = useState("");
   const [decodedEnvelope, setDecodedEnvelope] = useState(null);
   const [decodeError, setDecodeError] = useState(null);
-  const [decodeError, setDecodeError] = useState(null);
-  const [decodedEnvelope, setDecodedEnvelope] = useState(null);
   const tabRefs = useRef([]);
   const horizonAbortRef = useRef(null);
   const [accountDetails, setAccountDetails] = useState(null);
@@ -1256,13 +1253,8 @@ export default function App() {
     try {
       setDecodedEnvelope(decodeEnvelope(envelopeXdr, activeNetwork.passphrase));
     } catch (error) {
-      setDecodeError(error.message || "Could not decode the envelope.");
-    try {
-      setDecodedEnvelope(decodeEnvelope(envelopeXdr));
-      setDecodeError(null);
-    } catch (error) {
       setDecodedEnvelope(null);
-      setDecodeError(error.message || "Could not decode this envelope.");
+      setDecodeError(error.message || "Could not decode the envelope.");
     }
   };
 
