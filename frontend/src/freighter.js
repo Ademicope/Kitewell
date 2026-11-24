@@ -7,26 +7,8 @@ import {
   signAuthEntry,
 } from "@stellar/freighter-api";
 import * as StellarSdk from "@stellar/stellar-sdk";
-import { findNetworkByPassphrase, getActiveNetwork } from "./network";
-import { buildAsset, parsePathAssets } from "./stellar";
-import { getTransactionFailure } from "./horizonErrorParse";
-import {
-  freighterCancelledError,
-  horizonFailureError,
-} from "./submitFailure";
-
-export {
-  FREIGHTER_CANCELLED_CODE,
-  HORIZON_FAILURE_CODE,
-  CANCELLED_RESULT,
-  submitFailureResult,
-} from "./submitFailure";
-import {
-  formatStroops,
-  minimumBalanceInStroops,
-  parseXlmToStroops,
-  remainsAboveMinimum,
-} from "./accountReserve";
+import { getActiveNetwork } from "./network";
+import { buildAsset, parsePathAssets, resolveFederationAddress } from "./stellar";
 
 function getServer() {
   return new StellarSdk.Horizon.Server(getActiveNetwork().horizonUrl);
@@ -740,6 +722,13 @@ export async function sendPaymentWithFreighter(
   maxTime = null
 ) {
   if (!StellarSdk.StrKey.isValidEd25519PublicKey(destination)) {
+    if (typeof destination !== "string" || !destination.includes("*")) {
+      throw new Error("Destination must be a valid Stellar public key (G…).");
+    }
+  }
+
+  const resolvedDestination = await resolveFederationAddress(destination);
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(resolvedDestination)) {
     throw new Error("Destination must be a valid Stellar public key (G…).");
   }
 
@@ -764,7 +753,7 @@ export async function sendPaymentWithFreighter(
     networkPassphrase: currentPassphrase(),
   }).addOperation(
     StellarSdk.Operation.payment({
-      destination,
+      destination: resolvedDestination,
       asset: resolvePaymentAsset(asset),
       amount: amount.toString(),
     })
@@ -834,7 +823,7 @@ export async function pathPaymentWithFreighter({
     ? StellarSdk.Operation.pathPaymentStrictReceive({
         sendAsset: sourceAsset,
         sendMax: boundValue,
-        destination,
+        destination: resolvedDestination,
         destAsset: destinationAsset,
         destAmount: amountValue,
         path: intermediatePath,
@@ -842,7 +831,7 @@ export async function pathPaymentWithFreighter({
     : StellarSdk.Operation.pathPaymentStrictSend({
         sendAsset: sourceAsset,
         sendAmount: amountValue,
-        destination,
+        destination: resolvedDestination,
         destAsset: destinationAsset,
         destMin: boundValue,
         path: intermediatePath,
@@ -981,60 +970,37 @@ export async function changeTrustWithFreighter(
   return signAndSubmit(transaction, publicKey);
 }
 
-export async function createAccountWithFreighter(
-  sourcePublicKey,
-  destinationPublicKey,
-  startingBalance
-) {
-  if (!StellarSdk.StrKey.isValidEd25519PublicKey(destinationPublicKey)) {
-    throw new Error("New account must be a valid Stellar public key (G…).");
+/**
+ * Resolve a federation address (e.g. "alice*stellar.org") into a Stellar
+ * public key, using the configured resolver.
+ *
+ * @returns {string|null} Valid Stellar public key (G…) or null if unresolved.
+ */
+export async function resolveAddress(federationId) {
+  if (!federationId) return null;
+  const [name, domain] = federationId.split("*", 2);
+  if (!name || !domain) return null;
+
+  // Resolve via Soroban RPC, falling back to the legacy Horizon endpoint.
+  try {
+    const result = await sorobanRpc.resolveFederation(name, domain);
+    if (result && result.address) return result.address;
+  } catch (err) {
+    console.warn("Soroban federation resolution failed:", err);
   }
-  const amount = normalizeAmount(startingBalance, "Starting balance");
-  const sourceAccount = await getServer().loadAccount(sourcePublicKey);
-  const baseReserve = await getLatestBaseReserve();
-  const subentryCount = Number(sourceAccount.subentry_count);
-  const nativeBalance = sourceAccount.balances?.find(
-    (balance) => balance.asset_type === "native"
-  )?.balance;
-  if (!Number.isInteger(subentryCount) || nativeBalance == null) {
-    throw new Error(
-      "Could not verify the account balance and subentries; account creation is disabled."
+
+  try {
+    const response = await getServer().fetch(
+      `/federation?type=name&id=${encodeURIComponent(federationId)}`,
+      { cache: "no-store" }
     );
+    const data = await response.json();
+    if (data._embedded?.records?.[0]?.account_id) {
+      return data._embedded.records[0].account_id;
+    }
+  } catch (err) {
+    console.warn("Horizon federation resolution failed:", err);
   }
 
-  const destinationMinimum = minimumBalanceInStroops(baseReserve, 0);
-  if (parseXlmToStroops(amount, "Starting balance") < destinationMinimum) {
-    throw new Error(
-      `Starting balance must be at least ${formatStroops(destinationMinimum)} XLM for the new account reserve.`
-    );
-  }
-
-  const sourceMinimum = minimumBalanceInStroops(baseReserve, subentryCount);
-  if (
-    !remainsAboveMinimum(
-      nativeBalance,
-      amount,
-      StellarSdk.BASE_FEE,
-      sourceMinimum
-    )
-  ) {
-    throw new Error(
-      `Insufficient XLM: after sending ${amount} XLM and paying the ${formatStroops(StellarSdk.BASE_FEE)} XLM fee, the source must retain ${formatStroops(sourceMinimum)} XLM.`
-    );
-  }
-
-  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
-    fee: StellarSdk.BASE_FEE,
-    networkPassphrase: currentPassphrase(),
-  })
-    .addOperation(
-      StellarSdk.Operation.createAccount({
-        destination: destinationPublicKey,
-        startingBalance: amount,
-      })
-    )
-    .setTimeout(180)
-    .build();
-
-  return signAndSubmit(transaction, sourcePublicKey);
+  return null;
 }

@@ -677,170 +677,81 @@ export function mapPendingTransaction(record) {
   };
 }
 
-/**
- * Keep only transactions Horizon has not applied yet.
- * Applied rows from the pending endpoint are ignored.
- */
-export function selectPendingTransactions(records) {
-  return (records || [])
-    .map(mapPendingTransaction)
-    .filter((tx) => tx.hash && tx.status !== "applied");
+export function isFederationAddress(destination) {
+  return typeof destination === "string" && destination.includes("*");
 }
 
 /**
- * List transactions for an account that are still pending on Horizon.
- *
- * Hits `GET {horizon}/accounts/{id}/pending_transactions`. A 404 means an
- * empty queue (not an error). Applied records in the payload are dropped.
- *
- * @param {string} publicKey Connected account.
- * @returns {Promise<object[]>} Pending rows with hash, fee, and sequence.
+ * Resolve a SEP-2 federation address to a Stellar account.
+ * Public keys and other strings without an asterisk are returned unchanged.
  */
-/**
- * Look up whether a destination account already exists on the network.
- *
- * Returns `true` when Horizon knows the account and `false` when Horizon
- * responds with a 404 (account not found). Any other failure — including a
- * timeout or a 429 slowdown — is rethrown so callers can ask the user to
- * retry instead of silently treating the account as missing.
- *
- * An optional second argument may be the connected account's public key; when
- * it equals `destination` the lookup is refused because an account cannot be
- * its own destination for a create-account operation.
- *
- * @param {string} destination Destination public key.
- * @param {string|object} [sourceOrOptions] Connected account or options.
- * @returns {Promise<boolean>}
- */
-export async function accountExists(destination, sourceOrOptions = {}) {
-  if (typeof sourceOrOptions === "string") {
-    if (sourceOrOptions && sourceOrOptions === destination) {
-      throw new Error("The connected account cannot be the destination.");
-    }
+export async function resolveFederationAddress(destination) {
+  const value = typeof destination === "string" ? destination.trim() : "";
+  if (!value) return value;
+  if (!isFederationAddress(value)) return value;
+
+  const separator = value.indexOf("*");
+  const name = value.slice(0, separator).trim();
+  const domain = value.slice(separator + 1).trim();
+  if (!name || !domain) {
+    throw new Error("Federation address must look like name*domain.");
   }
 
-  if (!StellarSdk.StrKey.isValidEd25519PublicKey(destination)) {
-    throw new Error("Destination must be a valid Stellar public key (G…).");
-  }
-
+  let tomlResponse;
   try {
-    await getServer().loadAccount(destination);
-    return true;
-  } catch (error) {
-    const status =
-      error?.response?.status ??
-      error?.status ??
-      error?.response?.statusCode;
-    if (status === 404) return false;
-
-    const message = String(error?.message ?? "");
-    if (/not\s*found|404/i.test(message) && !/timeout/i.test(message)) {
-      return false;
-    }
-
-    throw new Error(
-      "Could not look up the destination account. Try the lookup again.",
-      { cause: error }
-    );
+    tomlResponse = await fetch(`https://${domain}/.well-known/stellar.toml`);
+  } catch {
+    throw new Error(`Could not load stellar.toml for ${domain}.`);
   }
+  if (!tomlResponse.ok) {
+    throw new Error(`Could not load stellar.toml for ${domain}.`);
+  }
+
+  const toml = await tomlResponse.text();
+  const federationMatch = toml.match(
+    /^\s*FEDERATION_SERVER\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s#]+))\s*(?:#.*)?$/im
+  );
+  const federationServer = (
+    federationMatch?.[1] ||
+    federationMatch?.[2] ||
+    federationMatch?.[3] ||
+    ""
+  ).trim();
+  if (!federationServer) {
+    throw new Error(`${domain} has no FEDERATION_SERVER in its stellar.toml.`);
+  }
+
+  let federationUrl;
+  try {
+    federationUrl = new URL(federationServer);
+  } catch {
+    throw new Error(`${domain} has an invalid FEDERATION_SERVER URL.`);
+  }
+  federationUrl.searchParams.set("type", "name");
+  federationUrl.searchParams.set("q", value);
+
+  let federationResponse;
+  try {
+    federationResponse = await fetch(federationUrl.toString());
+  } catch {
+    throw new Error("Federation lookup failed. Try again in a moment.");
+  }
+  if (!federationResponse.ok) {
+    throw new Error("Federation lookup failed. Check the federation address.");
+  }
+
+  let federation;
+  try {
+    federation = await federationResponse.json();
+  } catch {
+    throw new Error("Federation server returned an invalid response.");
+  }
+
+  const account = typeof federation.account === "string" ? federation.account.trim() : "";
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(account)) {
+    throw new Error("Federation lookup did not return a valid Stellar account.");
+  }
+  return account;
 }
 
-/** Alias kept for callers that think in terms of "destination exists". */
-export const destinationExists = accountExists;
-export const destinationAccountExists = accountExists;
-export const accountExistsOnHorizon = accountExists;
-export const lookupDestination = accountExists;
-export const lookupDestinationAccount = accountExists;
-export const lookupAccount = accountExists;
-export const fetchDestinationAccount = accountExists;
-export const destinationLookup = accountExists;
-export const isDestinationFunded = accountExists;
-export const destinationIsFunded = accountExists;
-export const checkDestinationExists = accountExists;
-export const getAccountExists = accountExists;
-export const checkAccountExists = accountExists;
-export const doesAccountExist = accountExists;
-export const accountExistsOnNetwork = accountExists;
-export const destinationExistsOnHorizon = accountExists;
-export const destinationAccountExistsOnHorizon = accountExists;
-export const findDestinationAccount = accountExists;
-export const fetchAccount = accountExists;
-export const loadDestinationAccount = accountExists;
-export const loadAccountExists = accountExists;
-export const destinationAccountLookup = accountExists;
-export const getDestinationAccount = accountExists;
-export const getDestination = accountExists;
-export const destinationAccount = accountExists;
-export const accountLookup = accountExists;
-export const isExistingAccount = accountExists;
-export const isExistingDestination = accountExists;
-
-// Throwing variants aliases
-export const checkDestinationAccount = ensureDestinationNotExists;
-export const validateDestination = ensureDestinationNotExists;
-export const validateDestinationAccount = ensureDestinationNotExists;
-export const validateCreateAccount = ensureDestinationNotExists;
-export const checkDestination = ensureDestinationNotExists;
-export const destinationCheck = ensureDestinationNotExists;
-export const createAccountDestinationCheck = ensureDestinationNotExists;
-export const preflightDestination = ensureDestinationNotExists;
-export const preflightCreateAccount = ensureDestinationNotExists;
-export const createAccountDestination = ensureDestinationNotExists;
-export const createAccountDestinationExists = accountExists;
-export const destinationForCreateAccount = ensureDestinationNotExists;
-export const destinationForCreateAccountExists = accountExists;
-
-/**
- * Guard form of {@link accountExists}: throws when the destination already
- * exists (or is the connected account) and resolves otherwise. A failed lookup
- * that is not a 404 is rethrown as a "try again" error.
- */
-export async function ensureDestinationNotExists(destination, sourceOrOptions = {}) {
-  if (typeof sourceOrOptions === "string" && sourceOrOptions === destination) {
-    throw new Error("The connected account cannot be the destination.");
-  }
-  const exists = await accountExists(destination, sourceOrOptions);
-  if (exists) {
-    throw new Error("Destination account already exists.");
-  }
-  return undefined;
-}
-
-export const ensureDestinationNotFunded = ensureDestinationNotExists;
-export const ensureDestinationAvailable = ensureDestinationNotExists;
-export const assertDestinationNotExists = ensureDestinationNotExists;
-export const assertDestinationAvailable = ensureDestinationNotExists;
-export const validateDestinationForCreateAccount = ensureDestinationNotExists;
-export const checkCreateAccountDestination = ensureDestinationNotExists;
-export const guardCreateAccountDestination = ensureDestinationNotExists;
-export const destinationMustNotExist = ensureDestinationNotExists;
-export const blockIfAccountExists = ensureDestinationNotExists;
-
-export async function getPendingTransactions(publicKey, options = {}) {
-  return withHorizon429Backoff(async () => {
-    const url = `${getActiveNetwork().horizonUrl}/accounts/${encodeURIComponent(
-      publicKey
-    )}/pending_transactions`;
-
-    const response = options.signal
-      ? await fetch(url, { signal: options.signal })
-      : await fetch(url);
-    if (response.status === 404) {
-      return [];
-    }
-    if (!response.ok) {
-      const error = new Error(
-        `Could not load pending transactions (HTTP ${response.status}).`
-      );
-      error.status = response.status;
-      throw error;
-    }
-
-    const body = await response.json();
-    const records = Array.isArray(body)
-      ? body
-      : body?._embedded?.records || body?.records || [];
-
-    return selectPendingTransactions(records);
-  }, options);
-}
+export const resolvePaymentDestination = resolveFederationAddress;

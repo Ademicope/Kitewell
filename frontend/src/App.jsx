@@ -39,12 +39,7 @@ import {
   getTransactions,
   explorerAccountUrl,
   explorerTxUrl,
-  isHorizonSlowdownError,
-  HORIZON_SLOWDOWN_MESSAGE,
-  statusWatchHref,
-  getAccountAuthConfig,
-  getIssuedAssetTrustlines,
-  IMMUTABLE_CONFIRMATION,
+  resolveFederationAddress,
 } from "./stellar";
 import {
   clearStoredOrderBookPair,
@@ -195,63 +190,7 @@ export default function App() {
   const tabRefs = useRef([]);
   const horizonAbortRef = useRef(null);
   const [accountDetails, setAccountDetails] = useState(null);
-  const [selectedSigners, setSelectedSigners] = useState([]);
-  const [horizonNotice, setHorizonNotice] = useState(null);
-  const [failedSubmits, setFailedSubmits] = useState([]);
-  const failedSubmitLogRef = useRef(createFailedSubmitLog());
-  const [webAuthForm, setWebAuthForm] = useState({ endpoint: "", serverAccount: "" });
-  const [webAuthResult, setWebAuthResult] = useState(null);
-  const [webAuthError, setWebAuthError] = useState(null);
-  const [issuerInput, setIssuerInput] = useState("");
-  const [issuerResult, setIssuerResult] = useState(null);
-  const [issuerError, setIssuerError] = useState(null);
-  const [streamedPayments, setStreamedPayments] = useState([]);
-  const [streamState, setStreamState] = useState(null);
-  const [txWatch, setTxWatch] = useState(null);
-  const [txWatchError, setTxWatchError] = useState(null);
-  const [hashForm, setHashForm] = useState("");
-  const [hashError, setHashError] = useState(null);
-  const streamSessionRef = useRef(null);
-  const watchTokenRef = useRef(0);
-
-  // Issue #512: the controller owns the streamed payments and their paging
-  // tokens, so a duplicate event can never reach the list twice; this only
-  // mirrors its state into React.
-  const paymentStream = useMemo(
-    () =>
-      createPaymentStreamController({
-        onChange: (records, state) => {
-          setStreamedPayments(records);
-          setStreamState(state);
-        },
-      }),
-    []
-  );
-
-  // Issuer auth flags + trustlines the connected account issued.
-  const [issuerConfig, setIssuerConfig] = useState(null);
-  const [issuerConfigError, setIssuerConfigError] = useState(null);
-  const [issuerForm, setIssuerForm] = useState({
-    homeDomain: "",
-    authRequired: false,
-    authRevocable: false,
-    authImmutable: false,
-    confirmation: "",
-  });
-  const [issuedTrustlines, setIssuedTrustlines] = useState([]);
-  const [issuedTrustlinesError, setIssuedTrustlinesError] = useState(null);
-
-  // Contract instance TTL + event tail in the Lab tab.
-  const [ttlInfo, setTtlInfo] = useState(null);
-  const [ttlError, setTtlError] = useState(null);
-  const [ttlForm, setTtlForm] = useState({ extendTo: "" });
-  const [ttlResult, setTtlResult] = useState(null);
-  const [codeTtl, setCodeTtl] = useState(null);
-  const [codeTtlError, setCodeTtlError] = useState(null);
-  const [labEvents, setLabEvents] = useState([]);
-  const [labEventsError, setLabEventsError] = useState(null);
-  const eventCursorRef = useRef(null);
-  const eventStartLedgerRef = useRef(null);
+  const [resolvedFederation, setResolvedFederation] = useState(null);
 
   const showToast = (message, type = "success", explorerUrl = null) => {
     setToast({ message, type, explorerUrl });
@@ -918,10 +857,18 @@ export default function App() {
 
     setTransactionFailure(null);
     setLoading("send");
+    let paymentDestination;
+    try {
+      paymentDestination = await resolveFederationAddress(sendForm.destination);
+    } catch (err) {
+      setLoading("");
+      return showToast(err.message || "Federation lookup failed.", "error");
+    }
+
     try {
       const result = await sendPaymentWithFreighter(
         publicKey,
-        sendForm.destination,
+        paymentDestination,
         amount,
         asset,
         sendForm.memoType,
@@ -1853,76 +1800,31 @@ export default function App() {
     tabRefs.current[nextIndex]?.focus();
   };
 
-  // Issue #513: one element reused by every tab that submits, because only one
-  // watch runs at a time and it must be visible right where the hash appeared.
-  const txWatchPanel = (
-    <div className="section">
-      <h2>Transaction status</h2>
-      <p className="muted">
-        A transaction submitted here is followed until it reaches the ledger, fails, or passes
-        its max time.
-      </p>
+  useEffect(() => {
+    const destination = sendForm.destination.trim();
+    if (!destination || !destination.includes("*")) {
+      setResolvedFederation(null);
+      return;
+    }
 
-      {txWatch && (
-        <div
-          className={
-            txWatch.status === "failed" || txWatch.status === "expired"
-              ? "info-box info-box--warning"
-              : "info-box"
-          }
-          role="status"
-          aria-live="polite"
-        >
-          <span className="eyebrow">
-            <code>{txWatch.hash}</code> · {txWatch.status}
-          </span>
-          <p className="muted">{txWatch.text}</p>
-          <a
-            className="text-link"
-            href={txWatch.explorerUrl}
-            target="_blank"
-            rel="noreferrer"
-            style={{ marginTop: 6, display: "inline-block" }}
-          >
-            Explorer ↗
-          </a>
-        </div>
-      )}
-      {txWatchError && (
-        <div className="info-box info-box--warning">
-          <span className="eyebrow">Transaction watch</span>
-          <p className="muted">{txWatchError}</p>
-        </div>
-      )}
+    let cancelled = false;
+    setLoading("resolve");
+    setResolvedFederation(null);
+    resolveFederationAddress(destination)
+      .then((account) => {
+        if (!cancelled) setResolvedFederation(account);
+      })
+      .catch((err) => {
+        if (!cancelled) showToast(err.message || "Federation lookup failed.", "error");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading("");
+      });
 
-      <form className="form" onSubmit={handleWatchHash}>
-        <label className="label" htmlFor="watch-tx-hash">
-          Watch a transaction hash
-        </label>
-        <input
-          id="watch-tx-hash"
-          className="input"
-          type="text"
-          placeholder="64 hexadecimal characters"
-          maxLength={64}
-          value={hashForm}
-          onChange={(e) => setHashForm(e.target.value)}
-          aria-describedby="watch-tx-hash-help"
-          required
-        />
-        <p className="muted" id="watch-tx-hash-help" role={hashError ? "alert" : undefined}>
-          {hashError || "Paste any transaction hash from this network to follow it."}
-        </p>
-        <button
-          className="btn btn--primary"
-          type="submit"
-          disabled={loading === "issue"}
-        >
-          Watch status
-        </button>
-      </form>
-    </div>
-  );
+    return () => {
+      cancelled = true;
+    };
+  }, [sendForm.destination]);
 
   return (
     <div className="app">
@@ -3171,7 +3073,15 @@ export default function App() {
                 </button>
               </form>
 
-              {txWatchPanel}
+              {resolvedFederation && (
+                <div className="info-box">
+                  <span className="eyebrow">Resolved federation address</span>
+                  <code>{resolvedFederation}</code>
+                  <p className="muted" style={{ marginTop: 4 }}>
+                    Destination account resolved before signing.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
