@@ -12,7 +12,9 @@ import {
   clawbackClaimableBalanceWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
-  renameBuilderWithFreighter,
+  readAdminState,
+  proposeAdminWithFreighter,
+  acceptAdminWithFreighter,
   setAccountOptionsWithFreighter,
   allowTrustWithFreighter,
   readContractInstanceTtl,
@@ -201,12 +203,8 @@ export default function App() {
   const [simulationFees, setSimulationFees] = useState(null);
   const [labState, setLabState] = useState(null);
   const [labStateError, setLabStateError] = useState(null);
-  const [rpcHealth, setRpcHealth] = useState({
-    ok: null,
-    description: "checking",
-    latestLedger: null,
-    error: null,
-  });
+  const [adminState, setAdminState] = useState(null);
+  const [proposeAdminForm, setProposeAdminForm] = useState({ address: "" });
   const [registerForm, setRegisterForm] = useState({ name: "" });
   const [lastRegisterTx, setLastRegisterTx] = useState(null);
   const [renameForm, setRenameForm] = useState({ name: "" });
@@ -1590,6 +1588,7 @@ export default function App() {
     if (!contractId) {
       setLabState(null);
       setLabStateError(null);
+      setAdminState(null);
       return;
     }
 
@@ -1609,8 +1608,20 @@ export default function App() {
     setLoading("labstate");
     setLabStateError(null);
     try {
+      // Always read builder state
       const state = await readKitewellState(contractId, publicKey);
       setLabState(state);
+      
+      // Try to read admin state, but don't fail if the contract doesn't have
+      // get_pending_admin yet (it's new in this PR and may not be deployed)
+      try {
+        const admin = await readAdminState(contractId);
+        setAdminState(admin);
+      } catch {
+        // Admin read failed (probably because get_pending_admin doesn't exist
+        // on the deployed contract yet), but keep the builder state
+        setAdminState(null);
+      }
     } catch (e) {
       setLabState(null);
       setLabStateError(
@@ -1676,7 +1687,7 @@ export default function App() {
     }
   };
 
-  const handleRename = async (e) => {
+  const handleProposeAdmin = async (e) => {
     e.preventDefault();
     if (!publicKey) return showToast("Connect Freighter first.", "error");
     const contractId = labInfo?.network?.contract?.kitewell;
@@ -1686,30 +1697,27 @@ export default function App() {
         "error"
       );
     }
-    if (!renameForm.name.trim()) {
-      return showToast("Enter a new builder name.", "error");
+    if (!proposeAdminForm.address.trim()) {
+      return showToast("Enter a successor admin address.", "error");
     }
-    setLoading("rename");
+    setLoading("propose-admin");
     try {
-      const result = await renameBuilderWithFreighter(
+      const result = await proposeAdminWithFreighter(
         publicKey,
         contractId,
-        renameForm.name
+        proposeAdminForm.address.trim()
       );
-      setRenameForm({ name: "" });
+      setProposeAdminForm({ address: "" });
       showToast(
         result.confirmed
-          ? `Renamed on-chain · ${result.hash.slice(0, 12)}…`
+          ? `Admin proposed · ${result.hash.slice(0, 12)}…`
           : `Submitted · ${result.hash.slice(0, 12)}…`,
         "success",
         explorerTxUrl(result.hash)
       );
-      const state = await readKitewellState(contractId, publicKey);
-      setLabState(state);
+      await refreshLabState();
     } catch (err) {
-      showToast(err.message || "Rename failed.", "error");
-    } finally {
-      setLoading("");
+      showToast(err.message || "Propose admin failed.", "error");
   const refreshIssuerPanel = async () => {
     if (!publicKey) return;
     setLoading("issuer");
@@ -1784,6 +1792,30 @@ export default function App() {
     }
   };
 
+  const handleAcceptAdmin = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    const contractId = labInfo?.network?.contract?.kitewell;
+    if (!contractId) {
+      return showToast(
+        "No contract id configured — deploy first (contracts/README.md).",
+        "error"
+      );
+    }
+    setLoading("accept-admin");
+    try {
+      const result = await acceptAdminWithFreighter(publicKey, contractId);
+      showToast(
+        result.confirmed
+          ? `Admin accepted · ${result.hash.slice(0, 12)}…`
+          : `Submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      await refreshLabState();
+    } catch (err) {
+      showToast(err.message || "Accept admin failed.", "error");
+    } finally {
+      setLoading("");
   const refreshTtlInfo = async (explicitContractId) => {
     const contractId = explicitContractId ?? configuredContractId;
     if (!contractId) {
@@ -4442,27 +4474,73 @@ export default function App() {
                       Reads lab_name, builder_count, and get_builder via Soroban RPC.
                     </p>
                   )}
-                  {labState?.archived && (
-                    <div className="info-box info-box--warning">
-                      <span className="eyebrow">⚠ Contract archived</span>
-                      <p className="muted" style={{ marginBottom: 12 }}>
-                        The contract entry has expired and needs to be restored before it can be read or invoked again.
-                      </p>
-                      <button
-                        className="btn btn--primary"
-                        type="button"
-                        onClick={handleRestore}
-                        disabled={loading === "restore" || !publicKey}
-                      >
-                        {loading === "restore" ? (
-                          <>
-                            <Spinner /> Restoring…
-                          </>
-                        ) : (
-                          "Restore contract"
-                        )}
-                      </button>
-                      {!publicKey && <p className="muted" style={{ marginTop: 8 }}>Connect Freighter to restore.</p>}
+                  {adminState && (
+                    <div className="info-box">
+                      <span className="eyebrow">Admin</span>
+                      <div style={{ marginBottom: 12 }}>
+                        <span className="metadata-label">Current admin</span>
+                        <code style={{ display: "block", marginTop: 4 }}>
+                          {adminState.admin ? shortenAddress(adminState.admin) : "Not initialized"}
+                        </code>
+                      </div>
+                      {adminState.pendingAdmin && (
+                        <div style={{ marginBottom: 12 }}>
+                          <span className="metadata-label">Pending admin</span>
+                          <code style={{ display: "block", marginTop: 4 }}>
+                            {shortenAddress(adminState.pendingAdmin)}
+                          </code>
+                        </div>
+                      )}
+                      {publicKey === adminState.admin && (
+                        <form onSubmit={handleProposeAdmin} style={{ marginTop: 12 }}>
+                          <label className="label" htmlFor="propose-admin-address">
+                            Propose successor admin
+                          </label>
+                          <input
+                            id="propose-admin-address"
+                            className="input"
+                            placeholder="G… address"
+                            value={proposeAdminForm.address}
+                            onChange={(e) =>
+                              setProposeAdminForm({ address: e.target.value })
+                            }
+                          />
+                          <button
+                            className="btn btn--primary"
+                            type="submit"
+                            disabled={loading === "propose-admin"}
+                          >
+                            {loading === "propose-admin" ? (
+                              <>
+                                <Spinner /> Proposing…
+                              </>
+                            ) : (
+                              "Propose admin"
+                            )}
+                          </button>
+                        </form>
+                      )}
+                      {publicKey === adminState.pendingAdmin && (
+                        <div style={{ marginTop: 12 }}>
+                          <p className="muted" style={{ marginBottom: 8 }}>
+                            You are the pending admin. Accept to become the live admin.
+                          </p>
+                          <button
+                            className="btn btn--primary"
+                            type="button"
+                            onClick={handleAcceptAdmin}
+                            disabled={loading === "accept-admin"}
+                          >
+                            {loading === "accept-admin" ? (
+                              <>
+                                <Spinner /> Accepting…
+                              </>
+                            ) : (
+                              "Accept admin"
+                            )}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                   {labStateError && (
