@@ -179,6 +179,20 @@ body {
 .network .eyebrow {
   margin-bottom: 2px;
 }
+.network__custom {
+  width: min(360px, 80vw);
+  margin-top: 6px;
+  text-align: left;
+}
+.network__custom summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: right;
+}
+.network__custom .form {
+  margin-top: 8px;
+}
 
 .main {
   display: flex;
