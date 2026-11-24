@@ -2,6 +2,7 @@ import {
   isConnected,
   setAllowed,
   getAddress,
+  getNetworkDetails,
   getNetwork,
   signTransaction,
   signAuthEntry,
@@ -48,118 +49,17 @@ const MAX_MEMO_TEXT_BYTES = 28;
 const MAX_U64 = 18446744073709551615n;
 export const TRANSACTION_FEE_STROOPS = StellarSdk.BASE_FEE;
 
-/**
- * The Soroban RPC server the Lab tab reads and simulates against.
- * The Lab tab probes this server before enabling any Soroban reads.
- */
-export const SOROBAN_RPC_URL = "https://soroban-testnet.stellar.org";
-const sorobanRpc = new StellarSdk.rpc.Server(SOROBAN_RPC_URL);
-
-export const SOROBAN_RPC_HEADERS = {
-  accept: "application/json",
-};
-
-/**
- * The Soroban RPC is reachable when a getHealth invocation returns SUCCESS.
- * Any timeout, network error, or non-SUCCESS status marks it unreachable,
- * which disables the Lab tab's simulate/deploy paths until it recovers.
- */
-export let sorobanRpcReady = false;
-export let sorobanRpcDescription = "unknown";
-export let sorobanRpcLatestLedger = null;
-export let sorobanRpcLastError = null;
-
-export async function checkSorobanRpcHealth(timeoutMs = 3000) {
-  // The Soroban RPC must answer getHealth within the timeout before any read,
-  // simulate, or deploy path is enabled. A timeout is unreachable, not a hung
-  // tab, so every failing case here is reported back to the Lab tab.
-  const base = SOROBAN_RPC_URL.replace(/\/$/, "");
-
-  let healthStatus;
-  let healthError = null;
-
-  try {
-    const healthRes = await fetch(
-      `${base}/rpc/method?request={"method":"getHealth"}`,
-      { headers: SOROBAN_RPC_HEADERS, signal: AbortSignal.timeout(timeoutMs) }
-    );
-
-    if (!healthRes.ok) {
-      healthStatus = healthRes.status;
-      throw new Error(`Soroban RPC returned HTTP ${healthRes.status}`);
-    }
-
-    const healthResult = await healthRes.json();
-    healthStatus = healthResult.result?.body?.status;
-  } catch (error) {
-    healthStatus = null;
-    healthError = error instanceof Error ? error.message : String(error);
-  }
-
-  sorobanRpcLastError = healthError;
-  sorobanRpcDescription =
-    healthStatus === "SUCCESS"
-      ? "reachable"
-      : healthStatus === "TIMEOUT"
-        ? "timeout"
-        : `unreachable (${healthError || `HTTP ${healthStatus}`})`;
-  sorobanRpcReady = healthStatus === "SUCCESS";
-
-  // Best-effort ledger read for the reachable case. A failure here cannot
-  // demote the RPC: the server already answered getHealth.
-  let latestLedger = null;
-  if (sorobanRpcReady) {
-    try {
-      const ledgerRes = await fetch(
-        `${base}/rpc/method?request={"method":"getLatestLedger"}`,
-        { headers: SOROBAN_RPC_HEADERS, signal: AbortSignal.timeout(timeoutMs) }
-      );
-
-      if (ledgerRes.ok) {
-        const ledgerResult = await ledgerRes.json();
-        latestLedger = ledgerResult.result?.body ?? null;
-      }
-    } catch {
-      /* Keep the last-known ledger when the ledger read fails briefly. */
-    }
-  }
-
-  sorobanRpcLatestLedger = latestLedger;
-
-  return {
-    ok: sorobanRpcReady,
-    description: sorobanRpcDescription,
-    latestLedger: sorobanRpcLatestLedger,
-    error: sorobanRpcLastError,
-  };
-}
-
-/** Read-only invokes need a funded-looking source; the zero address works. */
-const ZERO_ADDRESS =
-  "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-
-const POLL_ATTEMPTS = 15;
-const POLL_INTERVAL_MS = 2000;
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function scOptionToNative(scVal) {
-  if (!scVal) return null;
-  const native = StellarSdk.scValToNative(scVal);
-  // Option<T> arrives as an empty vec (None) or a one-element vec (Some).
-  return Array.isArray(native) ? (native.length > 0 ? native[0] : null) : native;
-}
-
-function buildContractTx(contract, method, args, sourceAccount, timeout = 60) {
-  return new StellarSdk.TransactionBuilder(sourceAccount, {
-    fee: StellarSdk.BASE_FEE,
+/** Build a spec-driven client for the active network's contract calls. */
+function kitewellClient(contractId) {
+  return createKitewellClient({
+    contractId,
     networkPassphrase: currentPassphrase(),
-  })
-    .addOperation(contract.call(method, ...args))
-    .setTimeout(timeout)
-    .build();
+  });
+}
+
+/** Send prepared XDR to Freighter and return the signed transaction. */
+function freighterSigner(publicKey) {
+  return (unsignedXdr) => signWithFreighter(unsignedXdr, publicKey);
 }
 
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d]; // \0asm
@@ -246,42 +146,36 @@ async function prepareSignSubmit(transaction, publicKey, label) {
 }
 
 /**
- * Read-only lookups against the Kitewell registry via Soroban RPC.
- * Calls lab_name(), builder_count(), and get_builder(viewer).
- *
- * @returns {{ labName: string, builderCount: number, builder: string|null }}
+ * Refuse to sign a contract invoke when Freighter is pointed at a different
+ * network than the contract the backend reports. Previously this surfaced as
+ * an opaque signing or submission failure after the wallet had already been
+ * prompted.
  */
-export async function readKitewellState(contractId, viewerAddress) {
-  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+async function assertFreighterNetwork(expectedPassphrase) {
+  const details = await getNetworkDetails();
+  if (details.error) {
     throw new Error(
-      "Contract ID must be a valid Soroban contract strkey (C…)."
+      details.error.message || "Could not read the network from Freighter."
     );
   }
+  if (details.networkPassphrase !== expectedPassphrase) {
+    throw new Error(
+      `Freighter is on ${details.network}, but this contract is on a different network. ` +
+        "Switch Freighter to the Lab network and try again."
+    );
+  }
+}
 
-  const contract = new StellarSdk.Contract(contractId);
-  const viewer = viewerAddress || ZERO_ADDRESS;
-  const source = new StellarSdk.Account(ZERO_ADDRESS, "0");
-
-  const simulate = async (method, ...args) => {
-    const tx = buildContractTx(contract, method, args, source, 30);
-    const sim = await sorobanRpc.simulateTransaction(tx);
-    if (sim.error) {
-      throw new Error(`${method}() simulation failed: ${sim.error}`);
-    }
-    return sim.result?.retval ?? null;
-  };
-
-  const [labName, builderCount, builder] = await Promise.all([
-    simulate("lab_name").then((v) => (v ? StellarSdk.scValToNative(v) : null)),
-    simulate("builder_count").then((v) =>
-      v ? StellarSdk.scValToNative(v) : 0
-    ),
-    simulate("get_builder", StellarSdk.nativeToScVal(viewer, { type: "address" })).then(
-      scOptionToNative
-    ),
-  ]);
-
-  return { labName, builderCount, builder };
+/**
+ * Read-only lookups against the Kitewell registry through the generated
+ * client: lab_name(), builder_count(), get_builder(viewer), paused(), and
+ * get_admin().
+ *
+ * @returns {{ labName: string, builderCount: number, builder: string|null,
+ *   paused: boolean, admin: string|null }}
+ */
+export async function readKitewellState(contractId, viewerAddress) {
+  return kitewellClient(contractId).readState(viewerAddress);
 }
 
 /**
@@ -339,7 +233,8 @@ export async function simulateRegisterBuilder(publicKey, contractId, name) {
 export async function registerBuilderWithFreighter(
   publicKey,
   contractId,
-  name
+  name,
+  expectedPassphrase = currentPassphrase()
 ) {
   const trimmed = (name || "").trim();
   if (!trimmed) {
@@ -351,185 +246,56 @@ export async function registerBuilderWithFreighter(
   if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
     throw new Error("Connect a valid Freighter address first.");
   }
-  if (!StellarSdk.StrKey.isValidContract(contractId)) {
-    throw new Error(
-      "Contract ID must be a valid Soroban contract strkey (C…)."
-    );
-  }
 
-  const contract = new StellarSdk.Contract(contractId);
-  const sourceAccount = await sorobanRpc.getAccount(publicKey);
-  const transaction = buildContractTx(
-    contract,
-    "register",
-    [
-      StellarSdk.nativeToScVal(publicKey, { type: "address" }),
-      StellarSdk.nativeToScVal(trimmed, { type: "string" }),
-    ],
-    sourceAccount
-  );
+  await assertFreighterNetwork(expectedPassphrase);
 
-  // Simulation fills in auth entries + resource fees for the invoke.
-  const submitted = await prepareSignSubmit(
-    transaction,
+  return kitewellClient(contractId).register(
     publicKey,
-    "Contract invoke"
+    trimmed,
+    freighterSigner(publicKey)
   );
-
-  return {
-    hash: submitted.hash,
-    returnValue: submitted.returnValue
-      ? StellarSdk.scValToNative(submitted.returnValue)
-      : null,
-    confirmed: Boolean(submitted.status),
-  };
 }
 
-/** Upload the Wasm bytes in their own Soroban tx (one host op per tx). */
-async function uploadKitewellWasm(publicKey, wasm) {
-  const sourceAccount = await sorobanRpc.getAccount(publicKey);
-  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
-    fee: StellarSdk.BASE_FEE,
-    networkPassphrase: currentPassphrase(),
-  })
-    .addOperation(StellarSdk.Operation.uploadContractWasm({ wasm }))
-    .setTimeout(60)
-    .build();
-
-  const submitted = await prepareSignSubmit(transaction, publicKey, "Wasm upload");
-  if (!submitted.status) {
-    throw new Error(
-      `Wasm upload submitted (${submitted.hash}) but not confirmed; install stopped.`
-    );
+/**
+ * Pause or unpause registration. Only the contract admin's signature is
+ * accepted; anyone else gets the contract's NotAdmin error in plain language
+ * and the flag is left untouched.
+ */
+export async function setPausedWithFreighter(
+  publicKey,
+  contractId,
+  paused,
+  expectedPassphrase = currentPassphrase()
+) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
   }
-  return { wasmHash: StellarSdk.hash(wasm), hash: submitted.hash };
-}
 
-/** Create the contract instance from an uploaded Wasm hash. */
-async function createKitewellContract(publicKey, wasmHash, salt) {
-  const sourceAccount = await sorobanRpc.getAccount(publicKey);
-  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
-    fee: StellarSdk.BASE_FEE,
-    networkPassphrase: currentPassphrase(),
-  })
-    .addOperation(
-      StellarSdk.Operation.createCustomContract({
-        address: new StellarSdk.Address(publicKey),
-        wasmHash,
-        salt,
-      })
-    )
-    .setTimeout(60)
-    .build();
+  await assertFreighterNetwork(expectedPassphrase);
 
-  const submitted = await prepareSignSubmit(
-    transaction,
+  return kitewellClient(contractId).setPaused(
     publicKey,
-    "Contract create"
+    Boolean(paused),
+    freighterSigner(publicKey)
   );
-  if (!submitted.status) {
-    throw new Error(
-      `Contract create submitted (${submitted.hash}) but not confirmed; no contract id yet.`
-    );
-  }
-
-  const contractId = contractIdFromResult(submitted.status.resultXdr);
-  if (!contractId) {
-    throw new Error(
-      `Contract create confirmed (${submitted.hash}) but returned no contract id.`
-    );
-  }
-  return { contractId, hash: submitted.hash };
 }
 
-/**
- * Install the Kitewell Wasm: upload bytes, then create a contract instance from
- * the uploaded hash. Each phase is a Freighter-signed Soroban tx; the new
- * contract ID comes from the create tx result. No `init` is called here.
- *
- * @returns {{ contractId: string, hash: string, uploadHash: string, confirmed: true }}
- */
-export async function installKitewellContract(publicKey, wasmBytes, options = {}) {
-  assertPublicKey(publicKey);
-  const wasm = normalizeWasmBytes(wasmBytes);
-  const salt = options.salt ?? newSalt();
-
-  const upload = await uploadKitewellWasm(publicKey, wasm);
-  const created = await createKitewellContract(publicKey, upload.wasmHash, salt);
-
-  return {
-    contractId: created.contractId,
-    hash: created.hash,
-    uploadHash: upload.hash,
-    confirmed: true,
-  };
-}
-
-/**
- * One-time `init(admin)` invoke for a freshly installed registry. The connected
- * account is the admin; the contract itself rejects a second init.
- */
-export async function initializeKitewellContract(publicKey, contractId) {
-  assertPublicKey(publicKey);
-  if (!StellarSdk.StrKey.isValidContract(contractId)) {
-    throw new Error(
-      "Contract ID must be a valid Soroban contract strkey (C…)."
-    );
+/** Remove the connected builder's own check-in with their signature. */
+export async function unregisterBuilderWithFreighter(
+  publicKey,
+  contractId,
+  expectedPassphrase = currentPassphrase()
+) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
   }
 
-  const contract = new StellarSdk.Contract(contractId);
-  const sourceAccount = await sorobanRpc.getAccount(publicKey);
-  const transaction = buildContractTx(
-    contract,
-    "init",
-    [StellarSdk.nativeToScVal(publicKey, { type: "address" })],
-    sourceAccount
+  await assertFreighterNetwork(expectedPassphrase);
+
+  return kitewellClient(contractId).unregister(
+    publicKey,
+    freighterSigner(publicKey)
   );
-
-  const submitted = await prepareSignSubmit(transaction, publicKey, "Contract init");
-  return { hash: submitted.hash, confirmed: Boolean(submitted.status) };
-}
-
-/**
- * Install + initialize the existing Kitewell contract from the Lab tab.
- *
- * `install` and `init` are injectable so a caller (or a test) can stub the two
- * phases without touching the network. Install always runs first, and init is
- * called exactly once with the new id; a failed install never yields an id.
- */
-export async function deployKitewellContract(publicKey, wasmBytes, options = {}) {
-  const {
-    install = installKitewellContract,
-    init = initializeKitewellContract,
-  } = options;
-
-  // Validate before submitting anything so a bad file/key cannot half-deploy.
-  assertPublicKey(publicKey);
-  normalizeWasmBytes(wasmBytes);
-
-  const installed = await install(publicKey, wasmBytes, {
-    salt: options.salt,
-  });
-  if (!StellarSdk.StrKey.isValidContract(installed?.contractId)) {
-    throw new Error("Install did not return a valid contract id; init was not called.");
-  }
-
-  let initialized;
-  try {
-    initialized = await init(publicKey, installed.contractId);
-  } catch (error) {
-    // The install already succeeded, so surface its id for diagnostics without
-    // treating it as a usable deployment.
-    if (error instanceof Error) error.contractId = installed.contractId;
-    throw error;
-  }
-
-  return {
-    contractId: installed.contractId,
-    installHash: installed.hash,
-    initHash: initialized?.hash ?? null,
-    confirmed: Boolean(installed.confirmed && initialized?.confirmed),
-  };
 }
 
 function createMemo(memoType, value) {

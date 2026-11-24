@@ -72,7 +72,7 @@ import {
   setActiveNetwork,
 } from "./network";
 import { validateAssetCode } from "./validateAssetCode";
-import { loadFeeSetting, saveFeeSetting } from "./feeSetting";
+import { fetchPathQuote, formatPathHops } from "./paths";
 import { decodeTransactionEnvelope } from "./txInspector";
 import TransactionFailureNotice from "./TransactionFailureNotice";
 import "./App.css";
@@ -186,20 +186,8 @@ export default function App() {
     amount: "",
   });
   const [pathResult, setPathResult] = useState(null);
-  const [composerForm, setComposerForm] = useState({
-    destination: "",
-    amount: "",
-    assetKey: "native",
-    memoType: "text",
-    memo: "",
-  });
-  const [composerEnvelope, setComposerEnvelope] = useState(null);
-  const [decoderInput, setDecoderInput] = useState("");
-  const [decoderEnvelope, setDecoderEnvelope] = useState(null);
-  const [decoderError, setDecoderError] = useState(null);
-  const [decoderDetails, setDecoderDetails] = useState(null);
-  const [decoderConfirmed, setDecoderConfirmed] = useState(false);
-  const [decoderSubmitting, setDecoderSubmitting] = useState(false);
+  const [pathQuote, setPathQuote] = useState(null);
+  const [unsignedEnvelope, setUnsignedEnvelope] = useState(null);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
   const [simulationFees, setSimulationFees] = useState(null);
@@ -213,13 +201,7 @@ export default function App() {
   });
   const [registerForm, setRegisterForm] = useState({ name: "" });
   const [lastRegisterTx, setLastRegisterTx] = useState(null);
-  const [feeStats, setFeeStats] = useState(null);
-  const [feeStatsError, setFeeStatsError] = useState(null);
-  const [feeSetting, setFeeSetting] = useState(() => loadFeeSetting());
-  const [customFee, setCustomFee] = useState(() => {
-    const saved = loadFeeSetting();
-    return saved?.source === "custom" ? saved.stroops : "";
-  });
+  const [lastLabTx, setLastLabTx] = useState(null);
   const [inspectForm, setInspectForm] = useState({ xdr: "" });
   const [inspectResult, setInspectResult] = useState(null);
   const [inspectError, setInspectError] = useState(null);
@@ -272,6 +254,20 @@ export default function App() {
   const activeNetwork = NETWORKS[networkId];
   const friendbotAvailable = isFriendbotAvailable();
   const pathModeField = PATH_MODE_FIELDS[pathForm.mode];
+  const pathSendAsset = {
+    isNative: pathForm.sendAssetType === "native",
+    code: pathForm.sendCode,
+    issuer: pathForm.sendIssuer,
+  };
+  const pathDestAsset = {
+    isNative: pathForm.destAssetType === "native",
+    code: pathForm.destCode,
+    issuer: pathForm.destIssuer,
+  };
+  const updatePathForm = (changes) => {
+    setPathForm((prev) => ({ ...prev, ...changes }));
+    // Editing the request invalidates any quote from the previous form state.
+    setPathQuote(null);
   const updatePathForm = (changes) => setPathForm((prev) => ({ ...prev, ...changes }));
   const updateOfferForm = (changes) => setOfferForm((prev) => ({ ...prev, ...changes }));
   // Any edit changes the operation list, so the previewed envelope is stale.
@@ -979,6 +975,49 @@ export default function App() {
     }
   };
 
+  const handlePathQuote = async () => {
+    if (!pathForm.destination || !pathForm.amount) {
+      return showToast("Destination and amount are required for a quote.", "error");
+    }
+    if (pathForm.sendAssetType === "credit" && (!pathForm.sendCode || !pathForm.sendIssuer)) {
+      return showToast("Send asset code and issuer are required.", "error");
+    }
+    if (pathForm.destAssetType === "credit" && (!pathForm.destCode || !pathForm.destIssuer)) {
+      return showToast("Destination asset code and issuer are required.", "error");
+    }
+
+    setLoading("pathquote");
+    setPathQuote(null);
+    try {
+      const paths = await fetchPathQuote({
+        mode: pathForm.mode,
+        sendAsset: pathSendAsset,
+        destAsset: pathDestAsset,
+        destination: pathForm.destination,
+        amount: pathForm.amount,
+      });
+      setPathQuote({
+        paths,
+        error: paths.length
+          ? null
+          : "Horizon found no path for this asset pair and amount.",
+      });
+    } catch (err) {
+      setPathQuote({ paths: [], error: err.message || "Path lookup failed." });
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleUsePath = (path) => {
+    const hops = formatPathHops(path);
+    setPathForm((prev) => ({ ...prev, path: hops }));
+    showToast(
+      hops ? `Path applied: ${hops}` : "Direct path applied.",
+      "info"
+    );
+  };
+
   const handlePathPayment = async (e) => {
     e.preventDefault();
     if (!publicKey) return showToast("Connect Freighter first.", "error");
@@ -1025,16 +1064,8 @@ export default function App() {
         publicKey,
         destination: pathForm.destination,
         mode: pathForm.mode,
-        sendAsset: {
-          isNative: pathForm.sendAssetType === "native",
-          code: pathForm.sendCode,
-          issuer: pathForm.sendIssuer,
-        },
-        destAsset: {
-          isNative: pathForm.destAssetType === "native",
-          code: pathForm.destCode,
-          issuer: pathForm.destIssuer,
-        },
+        sendAsset: pathSendAsset,
+        destAsset: pathDestAsset,
         amount: pathForm.amount,
         destMin: pathForm.mode === "strictSend" ? pathForm.bound : undefined,
         sendMax: pathForm.mode === "strictReceive" ? pathForm.bound : undefined,
@@ -1572,7 +1603,8 @@ export default function App() {
       const result = await registerBuilderWithFreighter(
         publicKey,
         contractId,
-        registerForm.name
+        registerForm.name,
+        labInfo?.network?.passphrase
       );
       trackSubmission(result.hash, "register");
       setLastRegisterTx(result);
@@ -3515,6 +3547,65 @@ export default function App() {
                 </p>
 
                 <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={handlePathQuote}
+                  disabled={loading === "pathquote"}
+                >
+                  {loading === "pathquote" ? (
+                    <>
+                      <Spinner /> Asking Horizon…
+                    </>
+                  ) : (
+                    "Get a Horizon path quote"
+                  )}
+                </button>
+
+                {pathQuote && (
+                  <div className="info-box">
+                    <span className="eyebrow">Horizon paths</span>
+                    {pathQuote.error ? (
+                      <p className="muted">{pathQuote.error}</p>
+                    ) : (
+                      <div className="tx-list">
+                        {pathQuote.paths.map((quote, index) => {
+                          const hops = formatPathHops(quote.path);
+                          const destLabel =
+                            pathForm.destAssetType === "native"
+                              ? "XLM"
+                              : pathForm.destCode;
+                          const sendLabel =
+                            pathForm.sendAssetType === "native"
+                              ? "XLM"
+                              : pathForm.sendCode;
+                          const estimate =
+                            pathForm.mode === "strictSend"
+                              ? `${quote.destinationAmount} ${destLabel} received`
+                              : `${quote.sourceAmount} ${sendLabel} spent`;
+                          return (
+                            <div key={`${hops}-${index}`} className="tx-item">
+                              <div className="tx-item__amount">
+                                {hops || "Direct path"}
+                              </div>
+                              <div className="tx-item__addr muted">
+                                {estimate}
+                              </div>
+                              <button
+                                className="btn btn--secondary"
+                                type="button"
+                                onClick={() => handleUsePath(quote.path)}
+                              >
+                                Use this path
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <button
                   className="btn btn--primary"
                   type="submit"
                   disabled={loading === "path" || requireWallet}
@@ -4150,6 +4241,18 @@ export default function App() {
                             {publicKey ? labState.builder ?? "Not registered" : "Connect to check"}
                           </span>
                         </div>
+                        <div>
+                          <span className="metadata-label">paused</span>
+                          <span className="metadata-value">
+                            {labState.paused ? "Yes — registration paused" : "No"}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">get_admin</span>
+                          <span className="metadata-value">
+                            {labState.admin ? shortenAddress(labState.admin) : "Not set"}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   ) : (
@@ -4163,49 +4266,66 @@ export default function App() {
                       <p className="muted">{labStateError}</p>
                     </div>
                   )}
-                  {labInfo && (
-                    <div className="info-box">
-                      <span className="eyebrow">Soroban RPC</span>
-                      <div className="metadata-grid">
-                        <div>
-                          <span className="metadata-label">Status</span>
-                          <span className="metadata-value">
-                            {rpcHealth.ok
-                              ? `reachable · ledger ${rpcHealth.latestLedger ?? "—"}`
-                              : `unreachable · ${rpcHealth.description}`}
-                          </span>
-                        </div>
-                        {rpcHealth.latestLedger !== null && (
-                          <div>
-                            <span className="metadata-label">Latest ledger</span>
-                            <span className="metadata-value">
-                              {rpcHealth.latestLedger}
-                            </span>
-                          </div>
-                        )}
-                        {rpcHealth.error && (
-                          <div>
-                            <span className="metadata-label">Error</span>
-                            <span className="metadata-value">
-                              {rpcHealth.error}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {!rpcHealth.ok && (
+                  {labState?.paused && (
                     <div className="info-box info-box--warning">
-                      <span className="eyebrow">Soroban RPC</span>
+                      <span className="eyebrow">Registration paused</span>
                       <p className="muted">
-                        Soroban RPC unreachable: {rpcHealth.description}. The Lab
-                        tab cannot simulate or deploy until it is reachable.
-                        Switching networks and refreshing rechecks the RPC.
+                        The admin paused check-ins. Registering now is rejected by the
+                        contract with a paused error; unpause to resume.
                       </p>
                     </div>
                   )}
-                  {!(labInfo || labError) && (
-                    <p className="muted">Open this tab to probe the backend.</p>
+                  <div className="section__row">
+                    <div className="subhead">Contract controls</div>
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      onClick={handleTogglePause}
+                      disabled={loading === "pause" || requireWallet}
+                    >
+                      {loading === "pause" ? (
+                        <>
+                          <Spinner /> Signing in Freighter…
+                        </>
+                      ) : labState?.paused ? (
+                        "Unpause registration"
+                      ) : (
+                        "Pause registration"
+                      )}
+                    </button>
+                    {publicKey && labState?.builder && (
+                      <button
+                        className="btn btn--secondary"
+                        type="button"
+                        onClick={handleUnregister}
+                        disabled={loading === "unregister"}
+                      >
+                        {loading === "unregister" ? (
+                          <>
+                            <Spinner /> Signing in Freighter…
+                          </>
+                        ) : (
+                          "Unregister me"
+                        )}
+                      </button>
+                    )}
+                  </div>
+                  {!publicKey && (
+                    <p className="muted">Connect Freighter to pause or unregister.</p>
+                  )}
+                  {lastLabTx && (
+                    <div className="info-box">
+                      <span className="eyebrow">Last contract tx</span>
+                      <code>{lastLabTx.hash}</code>
+                      <a
+                        href={explorerTxUrl(lastLabTx.hash)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-link"
+                      >
+                        Explorer ↗
+                      </a>
+                    </div>
                   )}
                   <form className="form" onSubmit={handleRegister}>
                     <label className="label" htmlFor="builder-name">
