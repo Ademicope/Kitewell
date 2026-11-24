@@ -282,6 +282,15 @@ export default function App() {
   const eventCursorRef = useRef(null);
   const eventStartLedgerRef = useRef(null);
 
+  // Lab tab signers/weights/thresholds state
+  const [signers, setSigners] = useState([]);
+  const [signerWeights, setSignerWeights] = useState([]);
+  const [lowThreshold, setLowThreshold] = useState(0);
+  const [medThreshold, setMedThreshold] = useState(0);
+  const [highThreshold, setHighThreshold] = useState(0);
+  const [editingSigner, setEditingSigner] = useState(null);
+  const [editingThreshold, setEditingThreshold] = useState(null);
+
   const showToast = (message, type = "success", explorerUrl = null) => {
     setToast({ message, type, explorerUrl });
     setTimeout(() => setToast(null), 4200);
@@ -440,83 +449,14 @@ export default function App() {
     };
   }, [balances]);
 
-  // Issue #512: payments stream only while the history tab is open on a
-  // connected account. Every way the issue closes the stream names itself here,
-  // and a network switch is handled by `start`, which closes the old stream
-  // before opening the new one.
+  // Keep signerWeights in sync with signers
   useEffect(() => {
-    const previous = streamSessionRef.current;
-
-    if (activeTab !== "History" || !publicKey) {
-      if (paymentStream.isOpen()) {
-        paymentStream.stop(
-          !publicKey
-            ? "disconnect"
-            : previous?.networkId !== networkId
-              ? "network-change"
-              : "tab-hidden"
-        );
-      }
-      streamSessionRef.current = null;
-      return;
+    if (signers.length !== signerWeights.length) {
+      // Initialize or trim weights to match signers count
+      const newWeights = signers.map(() => 0);
+      setSignerWeights(newWeights);
     }
-
-    if (
-      paymentStream.isOpen() &&
-      previous &&
-      previous.publicKey === publicKey &&
-      previous.networkId === networkId
-    ) {
-      return;
-    }
-
-    streamSessionRef.current = { publicKey, networkId };
-    try {
-      paymentStream.start({ publicKey, networkId });
-    } catch (err) {
-      paymentStream.fail(err);
-    }
-  }, [activeTab, publicKey, networkId, paymentStream]);
-
-  useEffect(
-    () => () => {
-      if (paymentStream.isOpen()) paymentStream.stop("tab-hidden");
-      streamSessionRef.current = null;
-    },
-    [paymentStream]
-  );
-
-  // Issue #513: one watch runs at a time, so a token makes an older watch's
-  // remaining polls invisible instead of letting two hashes fight over the box.
-  const startTxWatch = useCallback(
-    (hash) => {
-      const token = watchTokenRef.current + 1;
-      watchTokenRef.current = token;
-      setTxWatchError(null);
-      setTxWatch({
-        hash,
-        attempts: 0,
-        ...txStatusPresentation({
-          status: "pending",
-          explorerUrl: buildTransactionExplorerUrl(networkId, hash),
-        }),
-      });
-
-      watchTransactionStatus({
-        hash,
-        networkId,
-        onUpdate: (snapshot) => {
-          if (watchTokenRef.current !== token) return;
-          setTxWatch({ ...snapshot, ...txStatusPresentation(snapshot) });
-        },
-      }).catch((err) => {
-        if (watchTokenRef.current !== token) return;
-        setTxWatch(null);
-        setTxWatchError(err.message || "The transaction watch could not read this hash.");
-      });
-    },
-    [networkId]
-  );
+  }, [signers.length, signerWeights.length]);
 
   const refreshBalances = useCallback(async () => {
     if (!publicKey) return;
@@ -1947,279 +1887,89 @@ export default function App() {
     }
   };
 
-  const handleProposeAdmin = async (e) => {
-    e.preventDefault();
-    if (!publicKey) return showToast("Connect Freighter first.", "error");
-    const contractId = labInfo?.network?.contract?.kitewell;
-    if (!contractId) {
-      return showToast(
-        "No contract id configured — deploy first (contracts/README.md).",
-        "error"
-      );
-    }
-    if (!proposeAdminForm.address.trim()) {
-      return showToast("Enter a successor admin address.", "error");
-    }
-    setLoading("propose-admin");
-    try {
-      const result = await proposeAdminWithFreighter(
-        publicKey,
-        contractId,
-        proposeAdminForm.address.trim()
-      );
-      setProposeAdminForm({ address: "" });
-      showToast(
-        result.confirmed
-          ? `Admin proposed · ${result.hash.slice(0, 12)}…`
-          : `Submitted · ${result.hash.slice(0, 12)}…`,
-        "success",
-        explorerTxUrl(result.hash)
-      );
-      await refreshLabState();
-    } catch (err) {
-      showToast(err.message || "Propose admin failed.", "error");
-  const refreshIssuerPanel = async () => {
-    if (!publicKey) return;
-    setLoading("issuer");
-    try {
-      const config = await getAccountAuthConfig(publicKey);
-      setIssuerConfig(config);
-      setIssuerConfigError(null);
-      setIssuerForm({
-        homeDomain: config.homeDomain || "",
-        authRequired: config.authRequired,
-        authRevocable: config.authRevocable,
-        authImmutable: config.authImmutable,
-        confirmation: "",
-      });
-    } catch (err) {
-      setIssuerConfig(null);
-      setIssuerConfigError(err.message || "Could not read account flags.");
-    }
-
-    try {
-      setIssuedTrustlines(await getIssuedAssetTrustlines(publicKey));
-      setIssuedTrustlinesError(null);
-    } catch (err) {
-      setIssuedTrustlines([]);
-      setIssuedTrustlinesError(err.message || "Could not read issued trustlines.");
-    }
-    setLoading("");
+  // Handle signer weight change
+  const handleSignerWeightChange = (index, weight) => {
+    const newWeights = [...signerWeights];
+    newWeights[index] = weight;
+    setSignerWeights(newWeights);
   };
 
-  const handleSetIssuerOptions = async (e) => {
-    e.preventDefault();
-    if (!publicKey) return showToast("Connect Freighter first.", "error");
-    setLoading("issuer-update");
-    try {
-      await setAccountOptionsWithFreighter(publicKey, {
-        current: issuerConfig || {},
-        homeDomain: issuerForm.homeDomain,
-        authRequired: issuerForm.authRequired,
-        authRevocable: issuerForm.authRevocable,
-        authImmutable: issuerForm.authImmutable,
-        immutableConfirmation: issuerForm.confirmation,
-      });
-      showToast("Account flags updated.");
-      // A successful update refreshes both the flags and the account balances.
-      await refreshIssuerPanel();
-      await refreshBalances();
-    } catch (err) {
-      showToast(err.message || "Could not update account flags.", "error");
-    } finally {
-      setLoading("");
-    }
-  };
-
-  const handleAllowTrust = async (entry, authorize) => {
-    if (!publicKey) return showToast("Connect Freighter first.", "error");
-    setLoading(`allow-${entry.key}`);
-    try {
-      await allowTrustWithFreighter(publicKey, {
-        holder: entry.holder,
-        assetCode: entry.assetCode,
-        assetIssuer: entry.assetIssuer,
-        authorize,
-      });
-      showToast(
-        `${authorize ? "Authorized" : "Revoked"} ${shortenAddress(entry.holder)} for ${entry.assetCode}.`
-      );
-      await refreshIssuerPanel();
-    } catch (err) {
-      showToast(err.message || "Could not update the trustline.", "error");
-    } finally {
-      setLoading("");
-    }
-  };
-
-  const handleAcceptAdmin = async () => {
-    if (!publicKey) return showToast("Connect Freighter first.", "error");
-    const contractId = labInfo?.network?.contract?.kitewell;
-    if (!contractId) {
-      return showToast(
-        "No contract id configured — deploy first (contracts/README.md).",
-        "error"
-      );
-    }
-    setLoading("accept-admin");
-    try {
-      const result = await acceptAdminWithFreighter(publicKey, contractId);
-      showToast(
-        result.confirmed
-          ? `Admin accepted · ${result.hash.slice(0, 12)}…`
-          : `Submitted · ${result.hash.slice(0, 12)}…`,
-        "success",
-        explorerTxUrl(result.hash)
-      );
-      await refreshLabState();
-    } catch (err) {
-      showToast(err.message || "Accept admin failed.", "error");
-    } finally {
-      setLoading("");
-  const refreshTtlInfo = async (explicitContractId) => {
-    const contractId = explicitContractId ?? configuredContractId;
-    if (!contractId) {
-      setTtlInfo(null);
-      setTtlError(null);
-      return;
-    }
-    setLoading("ttl");
-    setTtlError(null);
-    try {
-      const info = await readContractInstanceTtl(contractId);
-      setTtlInfo(info);
-      setTtlForm({
-        extendTo: String((info.liveUntilLedgerSeq || info.latestLedger || 0) + 5000),
-      });
-    } catch (err) {
-      setTtlInfo(null);
-      setTtlError(err.message || "Could not read the instance TTL.");
-    } finally {
-      setLoading("");
-    }
-  };
-
-  const refreshCodeTtl = useCallback(async () => {
-    if (!configuredContractId) {
-      setCodeTtl(null);
-      setCodeTtlError(null);
-      return;
-    }
-    setLoading("code-ttl");
-    setCodeTtlError(null);
-    try {
-      const ttlData = await readContractTTL(configuredContractId);
-      setCodeTtl(ttlData);
-    } catch (err) {
-      setCodeTtl(null);
-      setCodeTtlError(err.message || "Could not read the contract code TTL.");
-    } finally {
-      setLoading("");
-    }
-  }, [configuredContractId]);
-
-  const handleExtendCodeTtl = async () => {
-    if (!publicKey) return showToast("Connect Freighter first.", "error");
-    if (!configuredContractId) {
-      return showToast("No contract id configured.", "error");
-    }
-    if (!codeTtl?.wasmHash || !codeTtl?.currentLedger) {
-      return showToast("Refresh the code TTL first.", "error");
-    }
-
-    const extendTo = codeTtl.currentLedger + 100000;
-    setLoading("extend-code");
-    try {
-      const result = await extendCodeTTL(
-        publicKey,
-        codeTtl.wasmHash,
-        extendTo,
-        codeTtl.currentLedger
-      );
-      showToast(`Code TTL extended to ledger ${result.deadline}.`, "success");
-      await refreshCodeTtl();
-    } catch (err) {
-      showToast(err.message || "Failed to extend code TTL.", "error");
-    } finally {
-      setLoading("");
-    }
-  };
-
-  const handleExtendTtl = async (e) => {
-    e.preventDefault();
-    if (!publicKey) return showToast("Connect Freighter first.", "error");
-    if (!configuredContractId) {
-      return showToast("No contract id configured — deploy first.", "error");
-    }
-    setLoading("ttl-extend");
-    try {
-      const result = await extendContractTtlWithFreighter(
-        publicKey,
-        configuredContractId,
-        ttlForm.extendTo,
-        {
-          currentDeadline: ttlInfo?.liveUntilLedgerSeq ?? undefined,
-          latestLedger: ttlInfo?.latestLedger ?? undefined,
-        }
-      );
-      setTtlResult({
-        hash: result.hash,
-        liveUntilLedgerSeq: result.liveUntilLedgerSeq,
-      });
-      showToast(
-        result.confirmed
-          ? `TTL extended to ledger ${result.liveUntilLedgerSeq}.`
-          : `TTL extension submitted · ${result.hash.slice(0, 12)}…`
-      );
-      await refreshTtlInfo(configuredContractId);
-    } catch (err) {
-      showToast(err.message || "Could not extend the instance TTL.", "error");
-    } finally {
-      setLoading("");
-    }
-  };
-
-  const pollLabEvents = useCallback(async (contractId) => {
-    if (!contractId) return;
-    try {
-      const result = await readKitewellEvents(contractId, {
-        cursor: eventCursorRef.current || undefined,
-        startLedger: eventStartLedgerRef.current || undefined,
-      });
-      if (eventStartLedgerRef.current === null && result.latestLedger) {
-        eventStartLedgerRef.current = result.latestLedger;
+  // Handle remove signer
+  const handleRemoveSigner = (index) => {
+    // Check if removing this signer would lock out the high threshold
+    const currentSignerWeight = signerWeights[index] ?? 0;
+    const remainingWeight = signerWeights.filter((_, i) => i !== index).reduce((sum, w) => sum + (w ?? 0), 0);
+    if (remainingWeight < highThreshold && signers.length > 1) {
+      if (!window.confirm(
+        `Removing this signer would leave ${remainingWeight} total weight, which is below the high threshold of ${highThreshold}.\n\nAre you sure you want to remove this signer? This may lock you out of high-threshold operations.`
+      )) {
+        return;
       }
-      if (result.cursor) eventCursorRef.current = result.cursor;
-      setLabEvents((previous) => {
-        const byId = new Map(previous.map((event) => [event.id, event]));
-        result.events.forEach((event) => byId.set(event.id, event));
-        return [...byId.values()];
-      });
-      setLabEventsError(null);
-    } catch (err) {
-      setLabEventsError(err.message || "Could not read contract events.");
     }
-  }, []);
+    setSigners(signers.filter((_, i) => i !== index));
+    setSignerWeights(signerWeights.filter((_, i) => i !== index));
+  };
 
-  // Start the tail at the ledger open when the Lab tab is first shown, and
-  // poll for new register / pause events while it stays open.
-  useEffect(() => {
-    if (activeTab !== "Lab" || !configuredContractId) {
-      if (activeTab !== "Lab") {
-        eventCursorRef.current = null;
-        eventStartLedgerRef.current = null;
-      }
-      return undefined;
+  // Handle add signer
+  const handleAddSigner = (newSignerKey) => {
+    if (!newSignerKey) return;
+    const trimmed = newSignerKey.trim();
+    if (!trimmed) return;
+    if (!StellarSdk.StrKey.isValidEd25519PublicKey(trimmed)) {
+      return showToast("Invalid signer public key format.", "error");
     }
-    eventCursorRef.current = null;
-    eventStartLedgerRef.current = null;
-    pollLabEvents(configuredContractId);
-    const timer = setInterval(
-      () => pollLabEvents(configuredContractId),
-      EVENT_POLL_MS
-    );
-    return () => clearInterval(timer);
-  }, [activeTab, configuredContractId, pollLabEvents]);
+    // Check if signer already exists
+    if (signers.includes(trimmed)) {
+      return showToast("This signer is already added.", "error");
+    }
+    setSigners([...signers, trimmed]);
+    setSignerWeights([...signerWeights, 0]);
+    showToast("Signer added with weight 0.");
+  };
+
+  // Handle setOptions transaction for signer weights and thresholds
+  const handleSetOptions = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+
+    // Build the setOptions operation with the edited values
+    const operations = [];
+
+    // Build the setOptions params
+    const setOptionsParams = {
+      lowThreshold: lowThreshold,
+      medThreshold: medThreshold,
+      highThreshold: highThreshold,
+      signer: signers.map((signer, index) => ({
+        address: signer,
+        weight: signerWeights[index] ?? 0,
+      })),
+    };
+
+    // Build the setOptions transaction
+    try {
+      setLoading("setoptions");
+      const sourceAccount = await getServer().loadAccount(publicKey);
+      const txBuilder = new StellarSdk.TransactionBuilder(sourceAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: currentPassphrase(),
+      });
+      txBuilder.setOptions(setOptionsParams);
+      const txXDR = txBuilder.setTimeout(180).build().toXDR();
+
+      // Show the envelope before Freighter opens
+      setUnsignedEnvelope(txXDR);
+      showToast(
+        "Review the unsigned setOptions envelope, then sign in Freighter.",
+        "info"
+      );
+    } catch (err) {
+      trackFailedSubmit("setoptions", err);
+      showToast(err.message || "Failed to build setOptions transaction.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
 
   const handleInspect = (event) => {
     event.preventDefault();
@@ -5085,10 +4835,183 @@ export default function App() {
                   )}
                 </>
               )}
+              {/* Signers, weights, and thresholds management */}
+              <div className="section" id="signers-thresholds-section">
+                <div className="section__row">
+                  <h2>Signer weights & thresholds</h2>
+                  <p className="muted">
+                    Manage account thresholds and signer weights. Weights are 0–255.
+                    A weight of 0 removes a signer.
+                  </p>
+                </div>
+                {accountDetails ? (
+                  <div className="metadata-grid">
+                    <div>
+                      <span className="metadata-label">Current low threshold</span>
+                      <span className="metadata-value">{accountDetails.thresholds?.low ?? 0}</span>
+                    </div>
+                    <div>
+                      <span className="metadata-label">Current medium threshold</span>
+                      <span className="metadata-value">{accountDetails.thresholds?.medium ?? 0}</span>
+                    </div>
+                    <div>
+                      <span className="metadata-label">Current high threshold</span>
+                      <span className="metadata-value">{accountDetails.thresholds?.high ?? 0}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="muted">Connect Freighter to view current thresholds.</p>
+                )}
+                {!accountDetails && !publicKey && (
+                  <p className="muted">Connect Freighter to manage signers and thresholds.</p>
+                )}
+                {accountDetails && (
+                  <form className="form" onSubmit={handleSetOptions}>
+                    <div className="metadata-grid">
+                      <div>
+                        <span className="metadata-label">Low threshold</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="255"
+                          step="1"
+                          value={lowThreshold}
+                          onChange={(e) => setLowThreshold(Number(e.target.value))}
+                        />
+                      </div>
+                      <div>
+                        <span className="metadata-label">Medium threshold</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="255"
+                          step="1"
+                          value={medThreshold}
+                          onChange={(e) => setMedThreshold(Number(e.target.value))}
+                        />
+                      </div>
+                      <div>
+                        <span className="metadata-label">High threshold</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="255"
+                          step="1"
+                          value={highThreshold}
+                          onChange={(e) => setHighThreshold(Number(e.target.value))}
+                        />
+                      </div>
+                    </div>
+                    <div className="section__row">
+                      <span className="metadata-label">Signers</span>
+                      <span className="metadata-value">{signers.length}</span>
+                    </div>
+                    {signers.length > 0 && (
+                      <ul className="signer-list">
+                        {signers.map((signer, index) => (
+                          <li key={signer} className="signer-row">
+                            <span className="signer-address">{signer}</span>
+                            <span className="signer-weight">
+                              <input
+                                type="number"
+                                min="0"
+                                max="255"
+                                step="1"
+                                value={signerWeights[index] ?? 0}
+                                onChange={(e) => handleSignerWeightChange(index, Number(e.target.value))}
+                              />
+                            </span>
+                            <button
+                              className="btn btn--secondary btn--sm"
+                              type="button"
+                              onClick={() => handleRemoveSigner(index)}
+                            >
+                              Remove
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {signers.length < 4 && (
+                      <div className="section__row">
+                        <span className="metadata-label">Add signer</span>
+                        <input
+                          type="text"
+                          placeholder="Signer public key (G...)"
+                          onChange={(e) => handleAddSigner(e.target.value)}
+                        />
+                        <button
+                          className="btn btn--primary"
+                          type="button"
+                          onClick={() => handleAddSigner(signerInput)}
+                          disabled={!signerInput}
+                        >
+                          Add
+                        </button>
+                      </div>
+                    )}
+                    <div className="section__row">
+                      <button
+        type="submit"
+        disabled={loading === "setoptions" || requireWallet}
+      >
+        {loading === "setoptions" ? (
+          <>
+            <Spinner /> Signing in Freighter…
+          </>
+        ) : (
+          "Submit setOptions"
+        )}
+      </button>
+                    </div>
+                  </form>
+                )}
+                {accountDetails && (
+                  <div className="warning-box">
+                    <span className="eyebrow">Warning</span>
+                    <p className="muted">
+                      {mediumThreshold > (signers.reduce((sum, w) => sum + (w.weight ?? 0), 0) || 0)
+                        ? "Medium threshold exceeds total signer weights!"
+                        : ""}
+                    </p>
+                  </div>
+                )}
+              </div>
               {!labInfo && !labError && (
                 <p className="muted">Open this tab to probe the backend.</p>
               )}
               <div className="info-box">
+              <div className="info-box">
+                <span className="eyebrow">Failed submits</span>
+                <p className="muted">
+                  {failedSubmits.length === 0
+                    ? "No failed submits this session yet."
+                    : `${failedSubmits.length} failed submission${
+                        failedSubmits.length === 1 ? "" : "s"
+                      } this session. Cleared on disconnect or reload — not stored in localStorage.`}
+                </p>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={handleDownloadFailedSubmits}
+                  disabled={failedSubmits.length === 0}
+                >
+                  Download failed JSON
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "History" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Payment history</h2>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={handleHistory}
+                  disabled={loading === "history" || requireWallet}
+
                 <span className="eyebrow">Failed submits</span>
                 <p className="muted">
                   {failedSubmits.length === 0
