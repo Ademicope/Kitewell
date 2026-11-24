@@ -732,6 +732,16 @@ body {
   grid-column: 1 / -1;
   font-size: 11px;
 }
+.tx-item__memo {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.tx-item__memo-value {
+  white-space: pre-wrap;
+}
 .tx-item__link {
   font-size: 11px;
   color: var(--info);
