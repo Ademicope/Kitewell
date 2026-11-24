@@ -12,18 +12,7 @@ import {
   clawbackClaimableBalanceWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
-  submitComposedOperations,
-  buildComposedOperation,
-  MAX_COMPOSED_OPERATIONS,
-  setAccountOptionsWithFreighter,
-  allowTrustWithFreighter,
-  readContractInstanceTtl,
-  extendContractTtlWithFreighter,
-  readContractTTL,
-  extendCodeTTL,
-  readKitewellEvents,
-  submitFailureResult,
-  signChallengeWithFreighter,
+  parseSep7PayUri,
 } from "./freighter";
 import {
   createFailedSubmitLog,
@@ -159,6 +148,8 @@ export default function App() {
     minTime: "",
     maxTime: "",
   });
+  const [sep7Uri, setSep7Uri] = useState("");
+  const [sep7Request, setSep7Request] = useState(null);
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [createAccountForm, setCreateAccountForm] = useState({
     destination: "",
@@ -958,7 +949,8 @@ export default function App() {
         minTime: "",
         maxTime: "",
       });
-      setUnsignedEnvelope(null);
+      setSep7Uri("");
+      setSep7Request(null);
       showToast(
         `Payment submitted · ${result.hash.slice(0, 12)}…`,
         "success",
@@ -2094,6 +2086,42 @@ export default function App() {
       showToast(err.message || "Simulation failed.", "error");
     } finally {
       setLoading("");
+    }
+  };
+
+  const handleSep7UriChange = (value) => {
+    setSep7Uri(value);
+    if (!value.trim()) {
+      setSep7Request(null);
+      return;
+    }
+
+    try {
+      const request = parseSep7PayUri(value);
+      setSep7Request(request);
+      setSendForm((previous) => ({
+        ...previous,
+        destination: request.destination,
+        amount: request.amount,
+        assetKey: request.assetKey,
+        memoType: request.memoType,
+        memo: request.memo,
+      }));
+    } catch (error) {
+      setSep7Request(null);
+      showToast(error.message || "Invalid SEP-7 pay URI.", "error");
+    }
+  };
+
+  const activateTab = (tab) => {
+    setActiveTab(tab);
+    if (tab === "History") handleHistory();
+    if (tab === "Lab") {
+      loadLabInfo();
+      refreshLabState();
+    }
+    if ((tab === "Wallet" || tab === "Assets" || tab === "Send") && publicKey) {
+      refreshBalances();
     }
   };
 
@@ -3259,6 +3287,28 @@ export default function App() {
                 envelope XDR, then sign in Freighter to submit it to Horizon Testnet.
               </p>
               <form onSubmit={handleSend} className="form">
+                <label className="label" htmlFor="sep7-uri">
+                  SEP-7 payment URI
+                </label>
+                <input
+                  id="sep7-uri"
+                  className="input"
+                  type="text"
+                  placeholder="web+stellar:pay?destination=G..."
+                  value={sep7Uri}
+                  onChange={(e) => handleSep7UriChange(e.target.value)}
+                />
+                {sep7Request && (
+                  <div className="muted">
+                    <p>Payment details imported from SEP-7.</p>
+                    <p>
+                      Origin domain: {sep7Request.originDomain || "Not provided"}
+                    </p>
+                    <p>
+                      Signature: {sep7Request.signature || "Not provided"}
+                    </p>
+                  </div>
+                )}
                 <label className="label" htmlFor="send-destination">
                   Destination (G… or M…)
                 </label>
@@ -3287,6 +3337,12 @@ export default function App() {
                   onChange={(e) => updateSendForm({ assetKey: e.target.value })}
                 >
                   <option value="native">XLM (native)</option>
+                  {sep7Request?.assetKey && sep7Request.assetKey !== "native" &&
+                    !balances.some((b) => b.key === sep7Request.assetKey) && (
+                      <option value={sep7Request.assetKey}>
+                        {sep7Request.assetCode} · requested by SEP-7
+                      </option>
+                    )}
                   {balances
                     .filter((b) => !b.isNative)
                     .map((b) => {

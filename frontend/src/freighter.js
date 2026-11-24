@@ -844,191 +844,106 @@ export async function changeTrustWithFreighter(
   return signAndSubmit(transaction, publicKey);
 }
 
-/**
- * Resolve a federation address (e.g. "alice*stellar.org") into a Stellar
- * public key, using the configured resolver.
- *
- * @returns {string|null} Valid Stellar public key (G…) or null if unresolved.
- */
-export async function resolveAddress(federationId) {
-  if (!federationId) return null;
-  const [name, domain] = federationId.split("*", 2);
-  if (!name || !domain) return null;
+const SEP7_ASSET_CODE = /^[A-Za-z0-9]{1,12}$/;
 
-  // Resolve via Soroban RPC, falling back to the legacy Horizon endpoint.
+export function parseSep7PayUri(uri) {
+  const value = typeof uri === "string" ? uri.trim() : "";
+  if (!value) throw new Error("SEP-7 URI is required.");
+
+  let parsed;
   try {
-    const result = await sorobanRpc.resolveFederation(name, domain);
-    if (result && result.address) return result.address;
-  } catch (err) {
-    console.warn("Soroban federation resolution failed:", err);
-  }
-
-  try {
-    const response = await getServer().fetch(
-      `/federation?type=name&id=${encodeURIComponent(federationId)}`,
-      { cache: "no-store" }
-    );
-    const data = await response.json();
-    if (data._embedded?.records?.[0]?.account_id) {
-      return data._embedded.records[0].account_id;
-    }
-  } catch (err) {
-    console.warn("Horizon federation resolution failed:", err);
-  }
-
-  return null;
-}
-
-/** Stellar's protocol limit for operations in one transaction. */
-export const MAX_COMPOSED_OPERATIONS = 100;
-
-const MAX_MANAGE_DATA_NAME_BYTES = 64;
-const MAX_MANAGE_DATA_VALUE_BYTES = 64;
-
-function assertComposedEntries(entries) {
-  if (!Array.isArray(entries) || entries.length === 0) {
-    throw new Error("Add at least one operation before signing.");
-  }
-  if (entries.length > MAX_COMPOSED_OPERATIONS) {
-    throw new Error(
-      `A transaction can contain at most ${MAX_COMPOSED_OPERATIONS} operations.`
-    );
-  }
-}
-
-/**
- * Turn one composer row into an SDK operation.
- *
- * Supported types: `payment`, `changeTrust`, and `manageData`. Validation
- * happens here so the composer can reject a bad row before the wallet opens.
- */
-export function buildComposedOperation(entry = {}) {
-  if (entry.type === "payment") {
-    if (!StellarSdk.StrKey.isValidEd25519PublicKey(entry.destination)) {
-      throw new Error("Destination must be a valid Stellar public key (G…).");
-    }
-
-    return StellarSdk.Operation.payment({
-      destination: entry.destination,
-      asset: resolvePaymentAsset(entry.asset),
-      amount: normalizeAmount(entry.amount),
-    });
-  }
-
-  if (entry.type === "changeTrust") {
-    const code = String(entry.code ?? "").trim().toUpperCase();
-    if (!code || code.length > 12) {
-      throw new Error("Asset code must be 1–12 characters.");
-    }
-    if (!StellarSdk.StrKey.isValidEd25519PublicKey(entry.issuer)) {
-      throw new Error("Issuer must be a valid Stellar public key (G…).");
-    }
-
-    return StellarSdk.Operation.changeTrust({
-      asset: new StellarSdk.Asset(code, entry.issuer),
-      limit: formatTrustlineLimit(entry.limit).formatted,
-    });
-  }
-
-  if (entry.type === "manageData") {
-    const name = String(entry.name ?? "").trim();
-    if (!name) {
-      throw new Error("Data entry name is required.");
-    }
-    if (new TextEncoder().encode(name).length > MAX_MANAGE_DATA_NAME_BYTES) {
-      throw new Error("Data entry name must be 64 UTF-8 bytes or fewer.");
-    }
-
-    const value = String(entry.value ?? "");
-    if (new TextEncoder().encode(value).length > MAX_MANAGE_DATA_VALUE_BYTES) {
-      throw new Error("Data entry value must be 64 UTF-8 bytes or fewer.");
-    }
-
-    return StellarSdk.Operation.manageData({ name, value });
-  }
-
-  throw new Error(`Unsupported operation type: ${entry.type}`);
-}
-
-/**
- * Build one transaction containing every composer row, in list order.
- * The 100-operation protocol cap and per-row validation are enforced here.
- */
-export function buildComposedTransaction(sourceAccount, entries) {
-  assertComposedEntries(entries);
-
-  const builder = new StellarSdk.TransactionBuilder(sourceAccount, {
-    fee: StellarSdk.BASE_FEE,
-    networkPassphrase: currentPassphrase(),
-  });
-
-  for (const entry of entries) {
-    builder.addOperation(buildComposedOperation(entry));
-  }
-
-  return builder.setTimeout(180).build();
-}
-
-function horizonErrorBody(error) {
-  const body = error?.response?.data ?? error?.response;
-  if (body && typeof body === "object") return body;
-  // signAndSubmit wraps a Horizon failure and keeps the raw error as `cause`.
-  if (error?.cause) return horizonErrorBody(error.cause);
-  return null;
-}
-
-/**
- * Horizon's zero-based index of the first failed operation in a submit error,
- * or null when the response does not name one.
- */
-export function getFailedOperationIndex(error) {
-  const body = horizonErrorBody(error);
-  const codes = body?.extras?.result_codes?.operations;
-  if (!Array.isArray(codes)) return null;
-
-  const index = codes.findIndex((code) => code && code !== "op_success");
-  return index === -1 ? null : index;
-}
-
-function withFailedOperationIndex(error) {
-  const index = getFailedOperationIndex(error);
-  if (index == null) return error;
-
-  const body = horizonErrorBody(error);
-  let reason = "transaction failed";
-  try {
-    reason = parseHorizonError(body).reason;
+    parsed = new URL(value);
   } catch {
-    /* keep the generic reason */
+    throw new Error("Invalid SEP-7 URI.");
   }
 
-  const wrapped = new Error(`Operation index ${index} failed: ${reason}`);
-  wrapped.operationIndex = index;
-  wrapped.cause = error;
-  return wrapped;
+  if (parsed.protocol !== "web+stellar:") {
+    throw new Error("URI must use the web+stellar scheme.");
+  }
+
+  const operation = parsed.pathname.replace(/^\/+|\/+$/g, "");
+  if (operation !== "pay") {
+    throw new Error("Only SEP-7 pay requests are supported.");
+  }
+
+  const params = parsed.searchParams;
+  const destination = (params.get("destination") || "").trim();
+  if (!destination) {
+    throw new Error("SEP-7 pay URI requires a destination.");
+  }
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(destination)) {
+    throw new Error("SEP-7 destination must be a valid Stellar public key (G…).");
+  }
+
+  const amount = (params.get("amount") || "").trim();
+
+  let assetCode = (params.get("asset_code") || "").trim();
+  let assetIssuer = (params.get("asset_issuer") || "").trim();
+  const assetParam = (params.get("asset") || "").trim();
+
+  if (assetParam && (!assetCode || !assetIssuer)) {
+    if (/^(native|xlm)$/i.test(assetParam)) {
+      assetCode = "";
+      assetIssuer = "";
+    } else {
+      const separator = assetParam.indexOf(":");
+      if (separator <= 0) {
+        throw new Error("SEP-7 asset must be XLM or CODE:ISSUER.");
+      }
+      assetCode = assetParam.slice(0, separator).trim();
+      assetIssuer = assetParam.slice(separator + 1).trim();
+    }
+  }
+
+  let asset;
+  let assetKey;
+
+  // XLM is native when no issuer is supplied.
+  if (
+    (!assetCode && !assetIssuer) ||
+    (!assetIssuer && /^(native|xlm)$/i.test(assetCode))
+  ) {
+    assetCode = "";
+    assetIssuer = "";
+    asset = { isNative: true };
+    assetKey = "native";
+  } else {
+    if (!SEP7_ASSET_CODE.test(assetCode) || !assetIssuer) {
+      throw new Error("SEP-7 credit asset requires a valid code and issuer.");
+    }
+    if (!StellarSdk.StrKey.isValidEd25519PublicKey(assetIssuer)) {
+      throw new Error("SEP-7 asset issuer must be a valid Stellar public key (G…).");
+    }
+    assetCode = assetCode.toUpperCase();
+    asset = { isNative: false, code: assetCode, issuer: assetIssuer };
+    assetKey = `${assetCode}:${assetIssuer}`;
+  }
+
+  const rawMemoType = (params.get("memo_type") || "text").trim().toLowerCase();
+  let memoType;
+  if (["text", "memo_text"].includes(rawMemoType)) memoType = "text";
+  else if (["id", "memo_id"].includes(rawMemoType)) memoType = "id";
+  else if (["hash", "memo_hash"].includes(rawMemoType)) memoType = "hash";
+  else throw new Error(`Unsupported SEP-7 memo type: ${rawMemoType}`);
+
+  const memo = params.get("memo") || "";
+  const signature = params.get("signature") || "";
+  const originDomain = params.get("origin_domain") || "";
+
+  return {
+    destination,
+    amount,
+    asset,
+    assetKey,
+    assetCode,
+    assetIssuer,
+    memo,
+    memoType,
+    signature,
+    originDomain,
+    origin_domain: originDomain,
+  };
 }
 
-/**
- * Sign the whole operation list once in Freighter and submit it to Horizon.
- * Empty lists and lists over 100 operations are rejected before Freighter is
- * opened. A failed submit carries `operationIndex` when Horizon names one.
- */
-export async function submitComposedOperations(publicKey, entries) {
-  assertComposedEntries(entries);
-
-  // Validate every row before touching the wallet or the network.
-  entries.forEach((entry) => buildComposedOperation(entry));
-
-  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
-    throw new Error("Connect a valid Freighter address first.");
-  }
-
-  const sourceAccount = await getServer().loadAccount(publicKey);
-  const transaction = buildComposedTransaction(sourceAccount, entries);
-
-  try {
-    return await signAndSubmit(transaction, publicKey);
-  } catch (error) {
-    throw withFailedOperationIndex(error);
-  }
-}
+// Short alias for callers and tests that use URI rather than Uri naming.
+export const parseSep7Uri = parseSep7PayUri;
