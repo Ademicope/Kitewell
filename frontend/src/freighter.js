@@ -692,6 +692,20 @@ export async function changeTrustWithFreighter(
   return signAndSubmit(transaction, publicKey);
 }
 
+function claimableBalanceId(balanceId) {
+  const id = String(balanceId || "").toLowerCase();
+  if (/^[0-9a-f]{72}$/.test(id)) {
+    if (!id.startsWith("00000000")) {
+      throw new Error("Claimable balance ID is not a claimable-balance type.");
+    }
+    return id;
+  }
+  if (/^[0-9a-f]{64}$/.test(id)) {
+    return `00000000${id}`;
+  }
+  throw new Error("Claimable balance ID must be 64 or 72 hexadecimal characters.");
+}
+
 /**
  * Update an issuer's home domain and/or auth flags with `setOptions`, signed by
  * the connected account. Validation (including the immutable confirmation
@@ -699,14 +713,13 @@ export async function changeTrustWithFreighter(
  * Freighter.
  */
 
+
 /** Claw back an unclaimed balance for an issued asset. */
 export async function clawbackClaimableBalanceWithFreighter(publicKey, balanceId) {
   if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
     throw new Error("Connect a valid Freighter address first.");
   }
-  if (!/^[0-9a-fA-F]{64}$/.test(balanceId || "")) {
-    throw new Error("Claimable balance ID must be 32-byte hexadecimal XDR.");
-  }
+  const encodedBalanceId = claimableBalanceId(balanceId);
 
   const sourceAccount = await getServer().loadAccount(publicKey);
   const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
@@ -715,7 +728,7 @@ export async function clawbackClaimableBalanceWithFreighter(publicKey, balanceId
   })
     .addOperation(
       StellarSdk.Operation.clawbackClaimableBalance({
-        balanceId: `00000000${balanceId}`,
+        balanceId: encodedBalanceId,
       })
     )
     .setTimeout(180)

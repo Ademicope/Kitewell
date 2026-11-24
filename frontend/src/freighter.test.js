@@ -436,4 +436,20 @@ describe("clawbackClaimableBalanceWithFreighter", () => {
     expect(signed.operations[0].type).toBe("clawbackClaimableBalance");
     expect(signed.operations[0].claimableBalanceId().toString("hex")).toBe("a".repeat(64));
   });
+
+  it("accepts a Horizon id that already includes the type prefix", async () => {
+    horizonServerMock.loadAccount.mockResolvedValue(new StellarSdk.Account(USER, "7"));
+    horizonServerMock.submitTransaction.mockResolvedValue({ hash: "clawback-hash" });
+    signTransactionMock.mockImplementation(async (xdr) => ({
+      error: null,
+      signedTxXdr: xdr,
+    }));
+
+    const horizonId = `00000000${"bb".repeat(32)}`;
+    await clawbackClaimableBalanceWithFreighter(USER, horizonId);
+
+    const [xdr] = signTransactionMock.mock.calls.at(-1);
+    const signed = StellarSdk.TransactionBuilder.fromXDR(xdr, StellarSdk.Networks.TESTNET);
+    expect(signed.operations[0].balanceId).toBe(horizonId);
+  });
 });
