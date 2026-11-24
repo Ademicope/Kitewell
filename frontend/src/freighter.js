@@ -8,15 +8,9 @@ import {
 } from "@stellar/freighter-api";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { findNetworkByPassphrase, getActiveNetwork } from "./network";
+import { buildAsset, parsePathAssets } from "./stellar";
+import { getTransactionFailure } from "./horizonErrorParse";
 import {
-  buildAsset,
-  getLatestBaseReserve,
-  parsePathAssets,
-} from "./stellar";
-import { parseHorizonError } from "./horizonErrorParse";
-import { parseSimulationFees } from "./simulationFees";
-import {
-  HORIZON_FAILURE_CODE,
   freighterCancelledError,
   horizonFailureError,
 } from "./submitFailure";
@@ -583,152 +577,24 @@ async function signWithFreighter(unsignedXdr, publicKey) {
   );
 }
 
-async function signAndSubmit(transaction, publicKey) {
-  const signedTx = await signWithFreighter(transaction.toXDR(), publicKey);
+async function submitSignedTransaction(signedTx) {
   try {
     return await getServer().submitTransaction(signedTx);
   } catch (error) {
-    const body = error?.response?.data;
-    if (body && typeof body === "object") {
-      try {
-        const { reason } = parseHorizonError(body);
-        throw horizonFailureError(reason, error);
-      } catch (maybeWrapped) {
-        if (maybeWrapped?.code === HORIZON_FAILURE_CODE) throw maybeWrapped;
-      }
-    }
-    throw error;
-  }
-}
+    const transactionFailure = getTransactionFailure(error);
+    if (!transactionFailure) throw error;
 
-/** Compare Stellar amounts without floating point. */
-function amountToStroops(value) {
-  const [whole, fraction = ""] = String(value).trim().split(".");
-  return (
-    BigInt(whole || "0") * 10000000n +
-    BigInt((fraction + "0000000").slice(0, 7))
-  );
-}
-
-/** Whether a parsed transaction envelope already carries `publicKey`'s signature. */
-function hasSignatureFrom(transaction, publicKey) {
-  const hint = StellarSdk.StrKey.decodeEd25519PublicKey(publicKey).slice(-4);
-  return transaction.signatures.some((signature) => {
-    const signatureHint = signature.hint();
-    return (
-      signatureHint.length === hint.length &&
-      hint.every((byte, index) => byte === signatureHint[index])
+    const failureError = horizonFailureError(
+      "Transaction failed on the network."
     );
-  });
-}
-
-/**
- * Build a SEP-7 transaction-request URI (web+stellar:tx) from an unsigned
- * transaction envelope XDR and the network passphrase.
- */
-export function buildSep7TxUri(envelopeXdr, passphrase) {
-  if (!envelopeXdr) {
-    throw new Error("Envelope XDR is required to build a SEP-7 URI.");
-  }
-  const params = new URLSearchParams({ network_passphrase: passphrase });
-  return `web+stellar:tx:${envelopeXdr}?${params.toString()}`;
-}
-
-/**
- * Parse a SEP-7 transaction-request URI and validate its network passphrase
- * matches the expected passphrase. Returns the envelope XDR on success.
- */
-export function parseSep7TxUri(uri, expectedPassphrase) {
-  if (!uri || !uri.startsWith("web+stellar:tx:")) {
-    throw new Error("Invalid SEP-7 transaction-request URI.");
-  }
-  // Remove the scheme prefix to get the rest: <envelope>?network_passphrase=...
-  const rest = uri.slice("web+stellar:tx:".length);
-  const questionIdx = rest.indexOf("?");
-  if (questionIdx === -1) {
-    throw new Error("SEP-7 URI missing network_passphrase parameter.");
-  }
-  const envelopeXdr = rest.slice(0, questionIdx);
-  if (!envelopeXdr) {
-    throw new Error("SEP-7 URI missing transaction envelope.");
-  }
-  const queryString = rest.slice(questionIdx + 1);
-  const params = new URLSearchParams(queryString);
-  const passphrase = params.get("network_passphrase");
-  if (!passphrase) {
-    throw new Error("SEP-7 URI missing network_passphrase parameter.");
-  }
-  if (passphrase !== expectedPassphrase) {
-    throw new Error("Transaction request is for a different network.");
-  }
-  return envelopeXdr;
-}
-
-/**
- * Submit a transaction envelope (signed or unsigned) through Freighter.
- * If the envelope is unsigned, it will be signed by Freighter before submission.
- * If already signed, it will be submitted as-is without adding a second signature.
- * Returns the submission result from Horizon.
- */
-export async function submitEnvelope(envelopeXdr, publicKey) {
-  const passphrase = currentPassphrase();
-  
-  // Parse the envelope to check if it's already signed
-  let transaction;
-  try {
-    transaction = StellarSdk.TransactionBuilder.fromXDR(envelopeXdr, passphrase);
-  } catch (err) {
-    throw new Error("Unable to decode transaction envelope: " + err.message);
-  }
-
-  const isSigned = transaction.signatures && transaction.signatures.length > 0;
-  
-  if (!isSigned) {
-    // Unsigned envelope: sign with Freighter then submit
-    const signedTx = await signWithFreighter(envelopeXdr, publicKey);
-    return getServer().submitTransaction(signedTx);
-  } else {
-    // Already signed: submit directly without re-signing
-    return getServer().submitTransaction(transaction);
+    failureError.transactionFailure = transactionFailure;
+    throw failureError;
   }
 }
 
-export function getServerForComposer() {
-  return new StellarSdk.Horizon.Server(getActiveNetwork().horizonUrl);
-}
-
-export function getCurrentPassphrase() {
-  return getActiveNetwork().passphrase;
-}
-
-export function createMemoForComposer(memoType, value) {
-  const MAX_MEMO_TEXT_BYTES = 28;
-  const MAX_U64 = 18446744073709551615n;
-
-  if (!value) return null;
-
-  if (memoType === "text") {
-    if (new TextEncoder().encode(value).length > MAX_MEMO_TEXT_BYTES) {
-      throw new Error("Text memos must be 28 UTF-8 bytes or fewer.");
-    }
-    return StellarSdk.Memo.text(value);
-  }
-
-  if (memoType === "id") {
-    if (!/^\d{1,20}$/.test(value) || BigInt(value) > MAX_U64) {
-      throw new Error("ID memos must be unsigned 64-bit integers.");
-    }
-    return StellarSdk.Memo.id(value);
-  }
-
-  if (memoType === "hash") {
-    if (!/^[0-9a-fA-F]{64}$/.test(value)) {
-      throw new Error("Hash memos must be exactly 64 hexadecimal characters.");
-    }
-    return StellarSdk.Memo.hash(value);
-  }
-
-  throw new Error(`Unsupported memo type: ${memoType}`);
+async function signAndSubmit(transaction, publicKey) {
+  const signedTx = await signWithFreighter(transaction.toXDR(), publicKey);
+  return submitSignedTransaction(signedTx);
 }
 
 /**
@@ -853,7 +719,7 @@ export async function submitEnvelopeWithFreighter(unsignedXdr, publicKey) {
   }
 
   const signedTx = await signWithFreighter(unsignedXdr, publicKey);
-  return getServer().submitTransaction(signedTx);
+  return submitSignedTransaction(signedTx);
 }
 
 /**

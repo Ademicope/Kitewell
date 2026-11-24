@@ -73,7 +73,7 @@ import {
 import { validateAssetCode } from "./validateAssetCode";
 import { checkThresholds } from "./thresholdCheck";
 import { decodeTransactionEnvelope } from "./txInspector";
-import LatestLedgerHeader from "./LatestLedgerHeader";
+import TransactionFailureNotice from "./TransactionFailureNotice";
 import "./App.css";
 
 const TABS = ["Wallet", "Fund", "Assets", "Send", "Path", "History", "Composer", "Lab"];
@@ -121,6 +121,7 @@ export default function App() {
   const [nextCursor, setNextCursor] = useState(null);
   const [loading, setLoading] = useState("");
   const [toast, setToast] = useState(null);
+  const [transactionFailure, setTransactionFailure] = useState(null);
   const [sendForm, setSendForm] = useState({
     destination: "",
     amount: "",
@@ -667,22 +668,10 @@ export default function App() {
     try {
       code = validateAssetCode(trustForm.code);
     } catch (err) {
+      setTransactionFailure(null);
       return showToast(err.message, "error");
     }
-    const limit = trustForm.limit || "1000000";
-    const fingerprint = `${code}|${trustForm.issuer}|${limit}`;
-    const gate = submitGuardRef.current.begin("trust", fingerprint);
-    if (!gate.allowed) return;
-    if (
-      gate.duplicate &&
-      !confirmDuplicate(
-        "You submitted this exact trustline in the last 15 seconds. Submit it again?"
-      )
-    ) {
-      submitGuardRef.current.end("trust");
-      return;
-    }
-
+    setTransactionFailure(null);
     setLoading("trust");
     try {
       const result = await changeTrustWithFreighter(
@@ -699,6 +688,7 @@ export default function App() {
       startTxWatch(result.hash);
     } catch (err) {
       trackFailedSubmit("changeTrust", err);
+      setTransactionFailure(err.transactionFailure ?? null);
       showToast(err.message || "Change trust failed.", "error");
     } finally {
       submitGuardRef.current.end("trust");
@@ -797,11 +787,8 @@ export default function App() {
       );
     }
 
-    const guardKey = `remove-${asset.key}`;
-    const gate = submitGuardRef.current.begin(guardKey, asset.key);
-    if (!gate.allowed) return;
-
-    setLoading(guardKey);
+    setTransactionFailure(null);
+    setLoading(`remove-${asset.key}`);
     try {
       const result = await changeTrustWithFreighter(publicKey, asset.code, asset.issuer, "0");
       const next = await getAccountBalances(publicKey);
@@ -810,6 +797,7 @@ export default function App() {
       startTxWatch(result.hash);
     } catch (err) {
       trackFailedSubmit("changeTrust", err);
+      setTransactionFailure(err.transactionFailure ?? null);
       showToast(err.message || `Could not remove the ${asset.code} trustline.`, "error");
     } finally {
       submitGuardRef.current.end(guardKey);
@@ -928,60 +916,7 @@ export default function App() {
       return;
     }
 
-    const fingerprint = [
-      sendForm.destination,
-      amount,
-      sendForm.assetKey,
-      sendForm.memoType,
-      sendForm.memo,
-    ].join("|");
-    const gate = submitGuardRef.current.begin("send", fingerprint);
-    if (!gate.allowed) return;
-    if (
-      gate.duplicate &&
-      !confirmDuplicate(
-        "You submitted this exact payment in the last 15 seconds. Submit it again?"
-      )
-    ) {
-      submitGuardRef.current.end("send");
-      return;
-    }
-
-    // Validate and convert time bounds from UTC to Unix seconds
-    let minTime = null;
-    let maxTime = null;
-    if (sendForm.minTime) {
-      const dt = new Date(sendForm.minTime);
-      if (isNaN(dt.getTime())) {
-        return showToast("Invalid minimum time.", "error");
-      }
-      minTime = Math.floor(dt.getTime() / 1000);
-    }
-    if (sendForm.maxTime) {
-      const dt = new Date(sendForm.maxTime);
-      if (isNaN(dt.getTime())) {
-        return showToast("Invalid maximum time.", "error");
-      }
-      maxTime = Math.floor(dt.getTime() / 1000);
-    }
-
-    const selected = balances.find((b) => b.key === sendForm.assetKey);
-    if (!selected) {
-      return showToast("Choose an asset you hold a trustline for.", "error");
-    }
-    const sellingLiabilities = parseFloat(selected.sellingLiabilities || "0");
-    const availableBalance = parseFloat(selected.balance) - sellingLiabilities;
-    if (parseFloat(amount) > availableBalance) {
-      return showToast(
-        `Insufficient ${selected.code} balance. Available: ${availableBalance.toFixed(7)} (balance: ${selected.balance}, selling liabilities: ${sellingLiabilities.toFixed(7)}).`,
-        "error"
-      );
-    }
-
-    const asset = selected.isNative
-      ? { isNative: true }
-      : { isNative: false, code: selected.code, issuer: selected.issuer };
-
+    setTransactionFailure(null);
     setLoading("send");
     try {
       const result = await sendPaymentWithFreighter(
@@ -1015,6 +950,7 @@ export default function App() {
       startTxWatch(result.hash);
     } catch (err) {
       trackFailedSubmit("payment", err);
+      setTransactionFailure(err.transactionFailure ?? null);
       showToast(err.message || "Payment failed.", "error");
     } finally {
       submitGuardRef.current.end("send");
@@ -1061,6 +997,7 @@ export default function App() {
     }
 
     setLoading("path");
+    setTransactionFailure(null);
     setPathResult(null);
     try {
       const result = await pathPaymentWithFreighter({
@@ -1098,6 +1035,7 @@ export default function App() {
       startTxWatch(result.hash);
     } catch (err) {
       trackFailedSubmit("pathPayment", err);
+      setTransactionFailure(err.transactionFailure ?? null);
       showToast(err.message || "Path payment failed.", "error");
     } finally {
       submitGuardRef.current.end("path");
@@ -1544,6 +1482,7 @@ export default function App() {
     if (!gate.allowed) return;
 
     setLoading("register");
+    setTransactionFailure(null);
     try {
       const result = await registerBuilderWithFreighter(
         publicKey,
@@ -2117,6 +2056,8 @@ export default function App() {
             </div>
           )}
         </section>
+
+        <TransactionFailureNotice failure={transactionFailure} />
 
         <nav className="tabs" aria-label="Lab sections" role="tablist">
           {TABS.map((t, index) => {
