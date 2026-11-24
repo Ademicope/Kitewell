@@ -399,17 +399,7 @@ describe("balance mapping", () => {
     loadAccountMock.mockResolvedValue(horizonAccountFixture());
 
     await expect(getAccountBalances("GTEST")).resolves.toEqual([
-      {
-        key: "native",
-        code: "XLM",
-        issuer: null,
-        balance: "3.5000000",
-        limit: null,
-        isNative: true,
-        sellingLiabilities: "0.0000000",
-        buyingLiabilities: "0.0000000",
-        available: "1.5000000", // 3.5 - (0.5 * (2 + 2)) = 1.5
-      },
+      { key: "native", code: "XLM", issuer: null, balance: "3.5000000", limit: null, isNative: true, sellingLiabilities: "0", buyingLiabilities: "0" },
       {
         key: "FOO:GISSUER",
         code: "FOO",
@@ -417,12 +407,8 @@ describe("balance mapping", () => {
         balance: "11.0000000",
         limit: "1000.0000000",
         isNative: false,
-        isAuthorized: false,
-        isAuthorizedToMaintainLiabilities: true,
-        clawbackEnabled: false,
-        sellingLiabilities: "0.0000000",
-        buyingLiabilities: "0.0000000",
-        available: "11.0000000",
+        sellingLiabilities: "0",
+        buyingLiabilities: "0",
       },
     ]);
   });
@@ -633,46 +619,78 @@ describe("getTransactions", () => {
   });
 });
 
-describe("getClaimableBalances", () => {
-  it("lists only creator balances and enables clawback only for an issuer asset", async () => {
-    const { getClaimableBalances } = await import("./stellar");
-    claimableCallMock.mockResolvedValue({
-      records: [
+describe("balance liabilities", () => {
+  it("includes selling and buying liabilities from Horizon with defaults", async () => {
+    fetchAccountViaApi.mockRejectedValue(new Error("backend down"));
+    loadAccountMock.mockResolvedValue({
+      id: "GTEST",
+      sequenceNumber: () => "123",
+      subentry_count: 2,
+      thresholds: { low_threshold: 0, med_threshold: 0, high_threshold: 0 },
+      balances: [
         {
-          id: "a".repeat(64),
-          asset: "KITE:GTEST",
-          amount: "4.0000000",
-          sponsor: "GCREATOR",
-          last_modified_time: "2026-01-01T00:00:00Z",
+          asset_type: "native",
+          balance: "100.0000000",
+          selling_liabilities: "10.5000000",
+          buying_liabilities: "5.2500000",
         },
-        { id: "b".repeat(64), asset: "KITE:GOTHER", amount: "2", sponsor: "OTHER" },
+        {
+          asset_type: "credit_alphanum4",
+          asset_code: "USDC",
+          asset_issuer: "GISSUER",
+          balance: "1000.0000000",
+          limit: "5000.0000000",
+          selling_liabilities: "200.0000000",
+          buying_liabilities: "100.0000000",
+        },
       ],
     });
-    assetCallMock.mockResolvedValue({
-      records: [{ flags: { auth_clawback_enabled: true } }],
-    });
 
-    await expect(getClaimableBalances("GCREATOR")).resolves.toEqual([
-      expect.objectContaining({
-        id: "a".repeat(64),
-        code: "KITE",
-        issuer: "GTEST",
-        createdByAccount: true,
-        clawbackEnabled: true,
-      }),
+    const balances = await getAccountBalances("GTEST");
+
+    expect(balances).toEqual([
+      {
+        key: "native",
+        code: "XLM",
+        issuer: null,
+        balance: "100.0000000",
+        limit: null,
+        isNative: true,
+        sellingLiabilities: "10.5000000",
+        buyingLiabilities: "5.2500000",
+      },
+      {
+        key: "USDC:GISSUER",
+        code: "USDC",
+        issuer: "GISSUER",
+        balance: "1000.0000000",
+        limit: "5000.0000000",
+        isNative: false,
+        sellingLiabilities: "200.0000000",
+        buyingLiabilities: "100.0000000",
+      },
     ]);
-    expect(claimableCallMock).toHaveBeenCalledTimes(1);
   });
 
-  it("hides clawback when the issuer asset does not allow clawback", async () => {
-    const { getClaimableBalances } = await import("./stellar");
-    claimableCallMock.mockResolvedValue({
-      records: [{ id: "c".repeat(64), asset: "KITE:GISSUER", sponsor: "GISSUER" }],
+  it("defaults missing liability fields to zero", async () => {
+    fetchAccountViaApi.mockRejectedValue(new Error("backend down"));
+    loadAccountMock.mockResolvedValue({
+      id: "GTEST",
+      sequenceNumber: () => "123",
+      subentry_count: 1,
+      thresholds: { low_threshold: 0, med_threshold: 0, high_threshold: 0 },
+      balances: [
+        {
+          asset_type: "native",
+          balance: "50.0000000",
+          // selling_liabilities and buying_liabilities omitted
+        },
+      ],
     });
-    assetCallMock.mockResolvedValue({ records: [{ flags: { auth_clawback_enabled: false } }] });
 
-    await expect(getClaimableBalances("GISSUER")).resolves.toEqual([
-      expect.objectContaining({ clawbackEnabled: false }),
-    ]);
+    const balances = await getAccountBalances("GTEST");
+
+    expect(balances[0].sellingLiabilities).toBe("0");
+    expect(balances[0].buyingLiabilities).toBe("0");
   });
 });

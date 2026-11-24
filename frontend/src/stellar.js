@@ -397,18 +397,8 @@ async function readBaseReserve() {
 function mapHorizonBalances(account, baseReserve = 0.5) {
   const subentryCount = account.subentry_count || 0;
   return account.balances.map((b) => {
-    if (b.asset_type === "liquidity_pool_shares") {
-      return {
-        key: `pool:${b.liquidity_pool_id}`,
-        code: "POOL",
-        issuer: null,
-        balance: b.balance,
-        limit: null,
-        isNative: false,
-        isPoolShare: true,
-        poolId: b.liquidity_pool_id,
-      };
-    }
+    const sellingLiabilities = b.selling_liabilities ?? "0";
+    const buyingLiabilities = b.buying_liabilities ?? "0";
     if (b.asset_type === "native") {
       return {
         key: "native",
@@ -417,7 +407,8 @@ function mapHorizonBalances(account, baseReserve = 0.5) {
         balance: b.balance,
         limit: null,
         isNative: true,
-        ...liabilityFields(b, true, subentryCount, baseReserve),
+        sellingLiabilities,
+        buyingLiabilities,
       };
     }
     return {
@@ -427,15 +418,8 @@ function mapHorizonBalances(account, baseReserve = 0.5) {
       balance: b.balance,
       limit: b.limit,
       isNative: false,
-      isAuthorized:
-        typeof b.is_authorized === "boolean" ? b.is_authorized : null,
-      isAuthorizedToMaintainLiabilities:
-        typeof b.is_authorized_to_maintain_liabilities === "boolean"
-          ? b.is_authorized_to_maintain_liabilities
-          : null,
-      clawbackEnabled:
-        typeof b.clawback_enabled === "boolean" ? b.clawback_enabled : null,
-      ...liabilityFields(b, false, subentryCount, baseReserve),
+      sellingLiabilities,
+      buyingLiabilities,
     };
   });
 }

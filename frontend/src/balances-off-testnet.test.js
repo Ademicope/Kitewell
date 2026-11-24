@@ -66,9 +66,8 @@ describe("Futurenet account balances", () => {
         balance: "3.5000000",
         limit: null,
         isNative: true,
-        sellingLiabilities: "0.0000000",
-        buyingLiabilities: "0.0000000",
-        available: "2.5000000", // 3.5 - (0.5 * (2 + 0)) = 2.5
+        sellingLiabilities: "0",
+        buyingLiabilities: "0",
       },
     ]);
     expect(loadAccountMock).toHaveBeenCalledWith("GTEST");

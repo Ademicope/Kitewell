@@ -1,4 +1,5 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
+import * as StellarSdk from "@stellar/stellar-sdk";
 import {
   checkFreighterInstalled,
   connectFreighterWallet,
@@ -11,16 +12,13 @@ import {
   clawbackClaimableBalanceWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
-  simulateRegisterBuilder,
-  setAccountOptionsWithFreighter,
-  allowTrustWithFreighter,
-  readContractInstanceTtl,
-  extendContractTtlWithFreighter,
-  readContractTTL,
-  extendCodeTTL,
-  readKitewellEvents,
-  submitFailureResult,
-  TRANSACTION_FEE_STROOPS,
+  buildSep7TxUri,
+  parseSep7TxUri,
+  getServerForComposer,
+  getCurrentPassphrase,
+  createMemoForComposer,
+  resolvePaymentAsset,
+  submitEnvelope,
 } from "./freighter";
 import {
   createFailedSubmitLog,
@@ -78,28 +76,7 @@ import { decodeTransactionEnvelope } from "./txInspector";
 import LatestLedgerHeader from "./LatestLedgerHeader";
 import "./App.css";
 
-const TABS = [
-  "Wallet",
-  "Fund",
-  "Assets",
-  "Offers",
-  "Issuer",
-  "Send",
-  "Path",
-  "Offer",
-  "Book",
-  "History",
-  "Pending",
-  "Inspect",
-  "Decode",
-  "Issuer",
-  "Web auth",
-  "Muxed",
-  "Lab",
-  "Issue",
-];
-const PENDING_REFRESH_MS = 8000;
-const EVENT_POLL_MS = 6000;
+const TABS = ["Wallet", "Fund", "Assets", "Send", "Path", "History", "Composer", "Lab"];
 const PATH_MODE_FIELDS = {
   strictSend: {
     amountLabel: "Amount to send",
@@ -150,6 +127,8 @@ export default function App() {
     assetKey: "native",
     memoType: "text",
     memo: "",
+    minTime: "",
+    maxTime: "",
   });
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [createAccountForm, setCreateAccountForm] = useState({
@@ -178,21 +157,20 @@ export default function App() {
     amount: "",
   });
   const [pathResult, setPathResult] = useState(null);
-  const [offerForm, setOfferForm] = useState({
-    sellingType: "native",
-    sellingCode: "",
-    sellingIssuer: "",
-    buyingType: "credit",
-    buyingCode: "",
-    buyingIssuer: "",
-    price: "",
+  const [composerForm, setComposerForm] = useState({
+    destination: "",
+    amount: "",
+    assetKey: "native",
+    memoType: "text",
+    memo: "",
   });
-  const [orderBook, setOrderBook] = useState(null);
-  const [orderBookError, setOrderBookError] = useState(null);
-  const [bookPair, setBookPair] = useState(readStoredOrderBookPair);
-  const [bookResult, setBookResult] = useState(null);
-  const bookClearGenerationRef = useRef(0);
-  const [unsignedEnvelope, setUnsignedEnvelope] = useState(null);
+  const [composerEnvelope, setComposerEnvelope] = useState(null);
+  const [decoderInput, setDecoderInput] = useState("");
+  const [decoderEnvelope, setDecoderEnvelope] = useState(null);
+  const [decoderError, setDecoderError] = useState(null);
+  const [decoderDetails, setDecoderDetails] = useState(null);
+  const [decoderConfirmed, setDecoderConfirmed] = useState(false);
+  const [decoderSubmitting, setDecoderSubmitting] = useState(false);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
   const [simulationFees, setSimulationFees] = useState(null);
@@ -321,20 +299,9 @@ export default function App() {
     setUnsignedEnvelope(null);
   };
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
-  const transactionFee = formatStroops(TRANSACTION_FEE_STROOPS);
-
-  const refreshReserve = useCallback(async () => {
-    try {
-      const baseReserve = await getLatestBaseReserve();
-      setBaseReserveInStroops(baseReserve);
-      setReserveError(null);
-    } catch (error) {
-      setBaseReserveInStroops(null);
-      setReserveError(
-        error.message || "Could not load the latest ledger reserve from Horizon."
-      );
-    }
-  }, []);
+  const selectedSendAssetAvailable = selectedSendAsset
+    ? parseFloat(selectedSendAsset.balance) - parseFloat(selectedSendAsset.sellingLiabilities || "0")
+    : null;
 
   useEffect(() => {
     checkFreighterInstalled().then(setFreighterInstalled);
@@ -980,11 +947,52 @@ export default function App() {
       return;
     }
 
+    // Validate and convert time bounds from UTC to Unix seconds
+    let minTime = null;
+    let maxTime = null;
+    if (sendForm.minTime) {
+      const dt = new Date(sendForm.minTime);
+      if (isNaN(dt.getTime())) {
+        return showToast("Invalid minimum time.", "error");
+      }
+      minTime = Math.floor(dt.getTime() / 1000);
+    }
+    if (sendForm.maxTime) {
+      const dt = new Date(sendForm.maxTime);
+      if (isNaN(dt.getTime())) {
+        return showToast("Invalid maximum time.", "error");
+      }
+      maxTime = Math.floor(dt.getTime() / 1000);
+    }
+
+    const selected = balances.find((b) => b.key === sendForm.assetKey);
+    if (!selected) {
+      return showToast("Choose an asset you hold a trustline for.", "error");
+    }
+    const sellingLiabilities = parseFloat(selected.sellingLiabilities || "0");
+    const availableBalance = parseFloat(selected.balance) - sellingLiabilities;
+    if (parseFloat(amount) > availableBalance) {
+      return showToast(
+        `Insufficient ${selected.code} balance. Available: ${availableBalance.toFixed(7)} (balance: ${selected.balance}, selling liabilities: ${sellingLiabilities.toFixed(7)}).`,
+        "error"
+      );
+    }
+
+    const asset = selected.isNative
+      ? { isNative: true }
+      : { isNative: false, code: selected.code, issuer: selected.issuer };
+
     setLoading("send");
     try {
-      const result = await submitEnvelopeWithFreighter(
-        unsignedEnvelope,
-        publicKey
+      const result = await sendPaymentWithFreighter(
+        publicKey,
+        sendForm.destination,
+        amount,
+        asset,
+        sendForm.memoType,
+        sendForm.memo,
+        minTime,
+        maxTime
       );
       trackSubmission(result.hash, "payment");
       const next = await getAccountBalances(publicKey);
@@ -995,6 +1003,8 @@ export default function App() {
         assetKey: "native",
         memoType: "text",
         memo: "",
+        minTime: "",
+        maxTime: "",
       });
       setUnsignedEnvelope(null);
       showToast(
@@ -1204,35 +1214,132 @@ export default function App() {
     }
   };
 
-  const handleOfferPriceChange = async (event, offer) => {
-    event.preventDefault();
+  const buildComposerEnvelope = async () => {
     if (!publicKey) return showToast("Connect Freighter first.", "error");
-    const newPrice = offerPrices[offer.id]?.trim();
-    setLoading("offer");
-    setOfferResult(null);
+    if (!composerForm.destination) {
+      return showToast("Destination is required.", "error");
+    }
+    let amount;
     try {
-      const result = await changeOfferPriceWithFreighter(publicKey, offer, newPrice);
-      setOfferResult({
-        id: offer.id,
-        oldPrice: result.oldPrice,
-        newPrice,
-        hash: result.hash,
-      });
-      setOfferPrices((previous) => ({ ...previous, [offer.id]: "" }));
-      setOfferRefresh((count) => count + 1);
-      showToast(`Offer ${offer.id} price change submitted.`);
-      startTxWatch(result.hash);
-    } catch (error) {
-      trackFailedSubmit("manageSellOffer", error);
-      showToast(error.message || "Could not change offer price.", "error");
+      amount = validatePaymentAmount(composerForm.amount);
+    } catch (err) {
+      return showToast(err.message, "error");
+    }
+    if (
+      composerForm.memoType === "text" &&
+      new TextEncoder().encode(composerForm.memo).length > 28
+    ) {
+      return showToast("Text memos must be 28 UTF-8 bytes or fewer.", "error");
+    }
+
+    const selected = balances.find((b) => b.key === composerForm.assetKey);
+    if (!selected) {
+      return showToast("Choose an asset you hold a trustline for.", "error");
+    }
+
+    const asset = selected.isNative
+      ? { isNative: true }
+      : { isNative: false, code: selected.code, issuer: selected.issuer };
+
+    setLoading("composer");
+    try {
+      const transactionMemo = createMemoForComposer(composerForm.memoType, composerForm.memo);
+      const sourceAccount = await getServerForComposer().loadAccount(publicKey);
+      const txBuilder = new StellarSdk.TransactionBuilder(sourceAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: getCurrentPassphrase(),
+      }).addOperation(
+        StellarSdk.Operation.payment({
+          destination: composerForm.destination,
+          asset: resolvePaymentAsset(asset),
+          amount: amount.toString(),
+        })
+      );
+
+      if (transactionMemo) {
+        txBuilder.addMemo(transactionMemo);
+      }
+
+      const transaction = txBuilder.setTimeout(180).build();
+      const envelopeXdr = transaction.toXDR();
+      setComposerEnvelope(envelopeXdr);
+      showToast("Envelope built. Copy the SEP-7 URI below.");
+    } catch (err) {
+      showToast(err.message || "Failed to build envelope.", "error");
     } finally {
       setLoading("");
     }
   };
 
-  const selectBookPrice = (row) => {
-    const price = row.price ?? (Number(row.priceR?.n) / Number(row.priceR?.d)).toString();
-    updateOfferForm({ price });
+  const copyComposerUri = async () => {
+    if (!composerEnvelope) return showToast("No envelope to copy.", "error");
+    try {
+      const uri = buildSep7TxUri(composerEnvelope, getCurrentPassphrase());
+      await navigator.clipboard.writeText(uri);
+      showToast("SEP-7 URI copied to clipboard.");
+    } catch (err) {
+      showToast(err.message || "Failed to copy URI.", "error");
+    }
+  };
+
+  const handleDecoderPaste = () => {
+    setDecoderError(null);
+    setDecoderEnvelope(null);
+    setDecoderDetails(null);
+    setDecoderConfirmed(false);
+    if (!decoderInput.trim()) return;
+    try {
+      const envelopeXdr = parseSep7TxUri(decoderInput.trim(), getCurrentPassphrase());
+      
+      // Decode the envelope to get details
+      const transaction = StellarSdk.TransactionBuilder.fromXDR(envelopeXdr, getCurrentPassphrase());
+      const source = transaction.sourceAccount || "Unknown";
+      const fee = transaction.fee || "0";
+      const operationCount = transaction.operations?.length || 0;
+      const isSigned = transaction.signatures && transaction.signatures.length > 0;
+      
+      setDecoderDetails({ source, fee, operationCount, isSigned });
+      setDecoderEnvelope(envelopeXdr);
+      showToast("Envelope loaded into decoder.");
+    } catch (err) {
+      setDecoderError(err.message);
+      showToast(err.message, "error");
+    }
+  };
+
+  const handleDecoderSubmit = async () => {
+    if (!decoderEnvelope || !decoderConfirmed) return;
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    
+    setDecoderSubmitting(true);
+    try {
+      const result = await submitEnvelope(decoderEnvelope, publicKey);
+      setDecoderEnvelope(null);
+      setDecoderDetails(null);
+      setDecoderConfirmed(false);
+      setDecoderInput("");
+      showToast(
+        `Transaction submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      // Refresh balances after submission
+      const next = await getAccountBalances(publicKey);
+      setBalances(next);
+    } catch (err) {
+      showToast(err.message || "Submit failed.", "error");
+    } finally {
+      setDecoderSubmitting(false);
+    }
+  };
+
+  const handleDecoderCancel = () => {
+    setDecoderEnvelope(null);
+    setDecoderDetails(null);
+    setDecoderConfirmed(false);
+    setDecoderInput("");
+    setDecoderError(null);
+    showToast("Decoder cleared.");
   };
 
   const handleHistory = async () => {
@@ -2491,13 +2598,14 @@ export default function App() {
                             {shortenAddress(b.issuer)}
                           </span>
                         )}
-                        {!b.isNative && (
-                          <div className="muted balance-row__flags">
-                            Authorization: {b.isAuthorized === true ? "Authorized" : b.isAuthorized === false ? "Unauthorized" : "Unknown"}
-                            {" · "}Liabilities: {b.isAuthorizedToMaintainLiabilities === true ? "Authorized" : b.isAuthorizedToMaintainLiabilities === false ? "Unauthorized" : "Unknown"}
-                            {" · "}Clawback: {b.clawbackEnabled === true ? "Enabled" : b.clawbackEnabled === false ? "Disabled" : "Unknown"}
-                          </div>
-                        )}
+                        <div className="balance-row__liabilities">
+                          <span className="liability selling" title="Selling liabilities (offers selling this asset)">
+                            ▼ {parseFloat(b.sellingLiabilities || "0").toLocaleString(undefined, { maximumFractionDigits: 7 })}
+                          </span>
+                          <span className="liability buying" title="Buying liabilities (offers buying this asset)">
+                            ▲ {parseFloat(b.buyingLiabilities || "0").toLocaleString(undefined, { maximumFractionDigits: 7 })}
+                          </span>
+                        </div>
                       </div>
                       <div className="balance-row__actions">
                         <span>
@@ -3026,16 +3134,18 @@ export default function App() {
                 >
                   <option value="native">XLM (native)</option>
                   {balances
-                    .filter((b) => !b.isNative && !b.isPoolShare)
-                    .map((b) => (
-                      <option key={b.key} value={b.key} disabled={b.isAuthorized === false}>
-                        {b.code} ·{" "}
-                        {parseFloat(b.balance).toLocaleString(undefined, {
-                          maximumFractionDigits: 4,
-                        })}
-                        {b.isAuthorized === false ? " · unauthorized (cannot send)" : ""}
-                      </option>
-                    ))}
+                    .filter((b) => !b.isNative)
+                    .map((b) => {
+                      const available = parseFloat(b.balance) - parseFloat(b.sellingLiabilities || "0");
+                      return (
+                        <option key={b.key} value={b.key}>
+                          {b.code} ·{" "}
+                          {available.toLocaleString(undefined, {
+                            maximumFractionDigits: 4,
+                          })}
+                        </option>
+                      );
+                    })}
                 </select>
                 {selectedSendAsset?.isAuthorized === false && (
                   <p className="muted" role="alert">
@@ -3043,7 +3153,7 @@ export default function App() {
                   </p>
                 )}
                 <label className="label" htmlFor="send-amount">
-                  Amount ({selectedSendAsset?.code ?? "XLM"})
+                  Amount ({selectedSendAsset?.code ?? "XLM"}){selectedSendAssetAvailable !== null ? ` · Available: ${selectedSendAssetAvailable.toFixed(7)}` : ""}
                 </label>
                 <input
                   id="send-amount"
@@ -3085,60 +3195,39 @@ export default function App() {
                   value={sendForm.memo}
                   onChange={(e) => updateSendForm({ memo: e.target.value })}
                 />
-                {unsignedEnvelope && (
-                  <div className="info-box">
-                    <span className="eyebrow">Unsigned envelope XDR</span>
-                    <code style={{ wordBreak: "break-all" }}>
-                      {unsignedEnvelope}
-                    </code>
-                    <p className="muted">
-                      Copy this envelope to hand it to another signer or the decoder.
-                      Copying does not sign or submit it.
-                    </p>
-                    <button
-                      className="btn btn--secondary btn--sm"
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(unsignedEnvelope);
-                        showToast(
-                          "Unsigned envelope copied. Nothing was signed or submitted.",
-                          "info"
-                        );
-                      }}
-                    >
-                      Copy XDR
-                    </button>
-                  </div>
-                )}
-                <div className="section__row">
-                  <button
-                    className="btn btn--secondary"
-                    type="button"
-                    onClick={handlePreviewEnvelope}
-                    disabled={loading === "preview" || requireWallet}
-                  >
-                    {loading === "preview" ? (
-                      <>
-                        <Spinner /> Building…
-                      </>
-                    ) : (
-                      "Build unsigned envelope"
-                    )}
-                  </button>
-                  <button
-                    className="btn btn--primary"
-                    type="submit"
-                    disabled={loading === "send" || loading === "preview" || requireWallet}
-                  >
-                    {loading === "send" ? (
-                      <>
-                        <Spinner /> Signing in Freighter…
-                      </>
-                    ) : (
-                      "Sign & send"
-                    )}
-                  </button>
-                </div>
+                <label className="label" htmlFor="send-min-time">
+                  Min time (UTC, optional)
+                </label>
+                <input
+                  id="send-min-time"
+                  className="input"
+                  type="datetime-local"
+                  value={sendForm.minTime}
+                  onChange={(e) => setSendForm({ ...sendForm, minTime: e.target.value })}
+                />
+                <label className="label" htmlFor="send-max-time">
+                  Max time (UTC, optional)
+                </label>
+                <input
+                  id="send-max-time"
+                  className="input"
+                  type="datetime-local"
+                  value={sendForm.maxTime}
+                  onChange={(e) => setSendForm({ ...sendForm, maxTime: e.target.value })}
+                />
+                <button
+                  className="btn btn--primary"
+                  type="submit"
+                  disabled={loading === "send" || requireWallet}
+                >
+                  {loading === "send" ? (
+                    <>
+                      <Spinner /> Signing in Freighter…
+                    </>
+                  ) : (
+                    "Sign & send"
+                  )}
+                </button>
               </form>
 
               {txWatchPanel}
@@ -3600,6 +3689,226 @@ export default function App() {
                   <p className="muted" style={{ marginTop: 6 }}>
                     Payments to this M address arrive at the base account above.
                   </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "Composer" && (
+            <div className="section">
+              <h2>Transaction Composer</h2>
+              <p className="muted">
+                Build an unsigned transaction envelope and export it as a SEP-7
+                <code>web+stellar:tx</code> URI for handoff to another signer.
+              </p>
+              <form onSubmit={(e) => { e.preventDefault(); buildComposerEnvelope(); }} className="form">
+                <label className="label" htmlFor="composer-destination">
+                  Destination
+                </label>
+                <input
+                  id="composer-destination"
+                  className="input"
+                  type="text"
+                  placeholder="G…"
+                  value={composerForm.destination}
+                  onChange={(e) => setComposerForm({ ...composerForm, destination: e.target.value })}
+                  required
+                />
+                <label className="label" htmlFor="composer-asset">
+                  Asset
+                </label>
+                <select
+                  id="composer-asset"
+                  className="input"
+                  value={composerForm.assetKey}
+                  onChange={(e) => setComposerForm({ ...composerForm, assetKey: e.target.value })}
+                >
+                  <option value="native">XLM (native)</option>
+                  {balances
+                    .filter((b) => !b.isNative)
+                    .map((b) => (
+                      <option key={b.key} value={b.key}>
+                        {b.code} ·{" "}
+                        {parseFloat(b.balance).toLocaleString(undefined, {
+                          maximumFractionDigits: 4,
+                        })}
+                      </option>
+                    ))}
+                </select>
+                <label className="label" htmlFor="composer-amount">
+                  Amount ({selectedSendAsset?.code ?? "XLM"})
+                </label>
+                <input
+                  id="composer-amount"
+                  className="input"
+                  type="number"
+                  step="0.0000001"
+                  min="0.0000001"
+                  placeholder="e.g. 10"
+                  value={composerForm.amount}
+                  onChange={(e) => setComposerForm({ ...composerForm, amount: e.target.value })}
+                  required
+                />
+                <label className="label" htmlFor="composer-memo-type">
+                  Memo type
+                </label>
+                <select
+                  id="composer-memo-type"
+                  className="input"
+                  value={composerForm.memoType}
+                  onChange={(e) =>
+                    setComposerForm({
+                      ...composerForm,
+                      memoType: e.target.value,
+                      memo: "",
+                    })
+                  }
+                >
+                  <option value="text">Text</option>
+                  <option value="id">ID</option>
+                  <option value="hash">Hash</option>
+                </select>
+                <label className="label" htmlFor="composer-memo">
+                  Memo (optional)
+                </label>
+                <input
+                  id="composer-memo"
+                  className="input"
+                  type="text"
+                  maxLength={memoField.maxLength}
+                  pattern={memoField.pattern}
+                  inputMode={memoField.inputMode}
+                  placeholder={memoField.placeholder}
+                  value={composerForm.memo}
+                  onChange={(e) => setComposerForm({ ...composerForm, memo: e.target.value })}
+                />
+                <button
+                  className="btn btn--primary"
+                  type="submit"
+                  disabled={loading === "composer" || requireWallet}
+                >
+                  {loading === "composer" ? (
+                    <>
+                      <Spinner /> Building…
+                    </>
+                  ) : (
+                    "Build envelope"
+                  )}
+                </button>
+              </form>
+
+              {composerEnvelope && (
+                <div className="info-box" style={{ marginTop: 16 }}>
+                  <span className="eyebrow">Unsigned envelope (XDR)</span>
+                  <code style={{ display: "block", wordBreak: "break-all", marginBottom: 8 }}>
+                    {composerEnvelope}
+                  </code>
+                  <button
+                    className="btn btn--secondary"
+                    type="button"
+                    onClick={copyComposerUri}
+                    disabled={loading === "composer"}
+                  >
+                    Copy SEP-7 URI
+                  </button>
+                </div>
+              )}
+
+              <hr style={{ margin: "24px 0" }} />
+
+              <h3>Decoder / Replace</h3>
+              <p className="muted">
+                Paste a <code>web+stellar:tx</code> URI to load its envelope.
+              </p>
+              <div className="form" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <input
+                  className="input"
+                  style={{ flex: 1, minWidth: 280 }}
+                  type="text"
+                  placeholder="web+stellar:tx:AAAA...?network_passphrase=..."
+                  value={decoderInput}
+                  onChange={(e) => setDecoderInput(e.target.value)}
+                />
+                <button
+                  className="btn btn--primary"
+                  type="button"
+                  onClick={handleDecoderPaste}
+                  disabled={loading === "composer"}
+                >
+                  Load envelope
+                </button>
+              </div>
+              {decoderError && (
+                <div className="info-box info-box--warning" style={{ marginTop: 8 }}>
+                  <span className="eyebrow">Decoder error</span>
+                  <p className="muted">{decoderError}</p>
+                </div>
+              )}
+              {decoderEnvelope && (
+                <div className="info-box" style={{ marginTop: 8 }}>
+                  <span className="eyebrow">Loaded envelope (XDR)</span>
+                  <code style={{ display: "block", wordBreak: "break-all", marginBottom: 8 }}>
+                    {decoderEnvelope}
+                  </code>
+                  {decoderDetails && (
+                    <div style={{ marginTop: 12, padding: 12, background: "var(--color-bg-secondary)", borderRadius: 6 }}>
+                      <div className="metadata-grid" style={{ marginBottom: 12 }}>
+                        <div>
+                          <span className="metadata-label">Source account</span>
+                          <span className="metadata-value">{shortenAddress(decoderDetails.source)}</span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Fee</span>
+                          <span className="metadata-value">{parseInt(decoderDetails.fee).toLocaleString()} stroops</span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Operations</span>
+                          <span className="metadata-value">{decoderDetails.operationCount}</span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Status</span>
+                          <span className="metadata-value">{decoderDetails.isSigned ? "Signed" : "Unsigned (will be signed by Freighter)"}</span>
+                        </div>
+                      </div>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={decoderConfirmed}
+                          onChange={(e) => setDecoderConfirmed(e.target.checked)}
+                          disabled={decoderSubmitting}
+                        />
+                        <span>
+                          I confirm submitting this transaction from <strong>{shortenAddress(decoderDetails.source)}</strong>
+                          with fee <strong>{parseInt(decoderDetails.fee).toLocaleString()} stroops</strong>
+                          and <strong>{decoderDetails.operationCount}</strong> operation(s).
+                        </span>
+                      </label>
+                      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                        <button
+                          className="btn btn--primary"
+                          type="button"
+                          onClick={handleDecoderSubmit}
+                          disabled={!decoderConfirmed || decoderSubmitting || !publicKey || loading === "composer"}
+                        >
+                          {decoderSubmitting ? (
+                            <>
+                              <Spinner size={14} /> Submitting…
+                            </>
+                          ) : (
+                            "Submit transaction"
+                          )}
+                        </button>
+                        <button
+                          className="btn btn--secondary"
+                          type="button"
+                          onClick={handleDecoderCancel}
+                          disabled={decoderSubmitting}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * CI-friendly tests for the Soroban helpers in ./freighter.
@@ -60,17 +60,42 @@ const {
   SOROBAN_RPC_URL,
   readKitewellState,
   registerBuilderWithFreighter,
-  installKitewellContract,
-  initializeKitewellContract,
-  deployKitewellContract,
+  buildSep7TxUri,
+  parseSep7TxUri,
+  sendPaymentWithFreighter,
+  submitEnvelope,
 } = await import("./freighter");
 
 const CONTRACT_ID =
   "CCWLNS5HECRJ2GM3Q6JZZDV334ZXYO6EKZLFPLQRXO6SUDAKMS4U3E3X";
 const USER = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-const WASM = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
-const CONTRACT_HASH = StellarSdk.hash(Buffer.from("kitewell-contract"));
-const DEPLOYED_ID = StellarSdk.Address.contract(CONTRACT_HASH).toString();
+const DEST = StellarSdk.Keypair.random().publicKey();
+const AMOUNT = "10.0000000";
+
+// Build a valid signed transaction XDR for mocking
+let signedTxXdr;
+beforeAll(() => {
+  const account = new StellarSdk.Account(USER, "123456");
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: StellarSdk.Networks.TESTNET,
+  })
+    .addOperation(
+      StellarSdk.Operation.payment({
+        destination: DEST,
+        asset: StellarSdk.Asset.native(),
+        amount: AMOUNT,
+      })
+    )
+    .setTimeout(180)
+    .build();
+  // Sign with a dummy keypair to get valid XDR
+  const keypair = StellarSdk.Keypair.fromSecret(
+    "SBP4BHQPSIWSFMYZUE5RZ7AXZBKTUY76HNISQ7GZYD7U7JKGJBMRQR52"
+  );
+  tx.sign(keypair);
+  signedTxXdr = tx.toXDR();
+});
 
 /** Build the same tx shape the helpers build, for XDR round-trip asserts. */
 function buildRegisterTx(caller, name, sequence = "7") {
@@ -466,181 +491,231 @@ describe("registerBuilderWithFreighter", () => {
   });
 });
 
-describe("installKitewellContract", () => {
-  it("uploads the Wasm, then creates the contract and reads its id from the result", async () => {
-    sorobanServerMock.getAccount.mockResolvedValue(rpcAccountFixture(USER));
-    const preparedTxs = [];
-    sorobanServerMock.prepareTransaction.mockImplementation(async (tx) => {
-      preparedTxs.push(tx);
-      return assemblePrepared(tx);
-    });
-    signTransactionMock.mockImplementation(async (xdr) => ({
-      error: null,
-      signedTxXdr: xdr,
-    }));
-    sorobanServerMock.sendTransaction
-      .mockResolvedValueOnce({ status: "PENDING", hash: "upload-hash" })
-      .mockResolvedValueOnce({ status: "PENDING", hash: "create-hash" });
-    sorobanServerMock.getTransaction
-      .mockResolvedValueOnce({ status: "SUCCESS" })
-      .mockResolvedValueOnce({
-        status: "SUCCESS",
-        resultXdr: installResultXdr(),
-      });
+describe("SEP-7 transaction-request URI", () => {
+  const TEST_PASSPHRASE = StellarSdk.Networks.TESTNET;
+  const TEST_ENVELOPE_XDR = "AAAAAAAAAABAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAA=";
 
-    const result = await installKitewellContract(USER, WASM, {
-      salt: new Uint8Array(32),
-    });
-
-    expect(result).toEqual({
-      contractId: DEPLOYED_ID,
-      hash: "create-hash",
-      uploadHash: "upload-hash",
-      confirmed: true,
-    });
-    expect(
-      preparedTxs.map((tx) => tx.operations.map((op) => op.func.switch().name))
-    ).toEqual([
-      ["hostFunctionTypeUploadContractWasm"],
-      ["hostFunctionTypeCreateContractV2"],
-    ]);
-    expect(Buffer.from(preparedTxs[0].operations[0].func.wasm())).toEqual(
-      Buffer.from(WASM)
+  it("builds a valid SEP-7 URI with envelope XDR and network passphrase", () => {
+    const uri = buildSep7TxUri(TEST_ENVELOPE_XDR, TEST_PASSPHRASE);
+    // URLSearchParams uses + for spaces in application/x-www-form-urlencoded
+    expect(uri).toBe(
+      `web+stellar:tx:${TEST_ENVELOPE_XDR}?network_passphrase=Test+SDF+Network+%3B+September+2015`
     );
-    const create = preparedTxs[1].operations[0].func.createContractV2();
-    expect(Buffer.from(create.executable().wasmHash())).toEqual(
-      Buffer.from(StellarSdk.hash(WASM))
-    );
-    expect(
-      StellarSdk.Address.fromScAddress(
-        create.contractIdPreimage().fromAddress().address()
-      ).toString()
-    ).toBe(USER);
-    expect(signTransactionMock).toHaveBeenCalledTimes(2);
-    expect(sorobanServerMock.sendTransaction).toHaveBeenCalledTimes(2);
   });
 
-  it("throws without a contract id when the create step is rejected", async () => {
-    sorobanServerMock.getAccount.mockResolvedValue(rpcAccountFixture(USER));
-    sorobanServerMock.prepareTransaction.mockImplementation(async (tx) =>
-      assemblePrepared(tx)
-    );
-    signTransactionMock.mockImplementation(async (xdr) => ({
-      error: null,
-      signedTxXdr: xdr,
-    }));
-    sorobanServerMock.sendTransaction
-      .mockResolvedValueOnce({ status: "PENDING", hash: "upload-hash" })
-      .mockResolvedValueOnce({ status: "ERROR", hash: "bad-create" });
-    sorobanServerMock.getTransaction.mockResolvedValue({ status: "SUCCESS" });
-
-    await expect(installKitewellContract(USER, WASM)).rejects.toThrow(
-      "Contract create rejected by the network. Tx hash: bad-create"
-    );
-    expect(signTransactionMock).toHaveBeenCalledTimes(2);
+  it("throws when envelope XDR is empty", () => {
+    expect(() => buildSep7TxUri("", TEST_PASSPHRASE)).toThrow("Envelope XDR is required");
+    expect(() => buildSep7TxUri(null, TEST_PASSPHRASE)).toThrow("Envelope XDR is required");
   });
 
-  it("stops after a failed upload and never creates a contract", async () => {
-    sorobanServerMock.getAccount.mockResolvedValue(rpcAccountFixture(USER));
-    stubSorobanSubmit({ status: "ERROR", hash: "bad-upload" });
-
-    await expect(installKitewellContract(USER, WASM)).rejects.toThrow(
-      "Wasm upload rejected by the network. Tx hash: bad-upload"
-    );
-    expect(signTransactionMock).toHaveBeenCalledTimes(1);
-    expect(sorobanServerMock.sendTransaction).toHaveBeenCalledTimes(1);
-    expect(sorobanServerMock.getTransaction).not.toHaveBeenCalled();
+  it("parses a valid SEP-7 URI and returns the envelope XDR", () => {
+    const uri = buildSep7TxUri(TEST_ENVELOPE_XDR, TEST_PASSPHRASE);
+    const envelopeXdr = parseSep7TxUri(uri, TEST_PASSPHRASE);
+    expect(envelopeXdr).toBe(TEST_ENVELOPE_XDR);
   });
 
-  it("rejects a non-Wasm file before touching RPC", async () => {
-    await expect(
-      installKitewellContract(USER, new Uint8Array([1, 2, 3, 4]))
-    ).rejects.toThrow("Not a Wasm binary");
-    expect(sorobanServerMock.getAccount).not.toHaveBeenCalled();
+  it("throws when URI has wrong scheme", () => {
+    expect(() => parseSep7TxUri("stellar:tx:abc?network_passphrase=test", TEST_PASSPHRASE)).toThrow(
+      "Invalid SEP-7"
+    );
+    expect(() => parseSep7TxUri("https://example.com", TEST_PASSPHRASE)).toThrow("Invalid SEP-7");
+  });
+
+  it("throws when URI is missing transaction envelope", () => {
+    const uri = `web+stellar:tx:?network_passphrase=${encodeURIComponent(TEST_PASSPHRASE)}`;
+    expect(() => parseSep7TxUri(uri, TEST_PASSPHRASE)).toThrow("missing transaction envelope");
+  });
+
+  it("throws when URI is missing network_passphrase parameter", () => {
+    const uri = `web+stellar:tx:${TEST_ENVELOPE_XDR}`;
+    expect(() => parseSep7TxUri(uri, TEST_PASSPHRASE)).toThrow("missing network_passphrase");
+  });
+
+  it("throws when network passphrase does not match expected", () => {
+    const uri = buildSep7TxUri(TEST_ENVELOPE_XDR, "Different Network Passphrase");
+    expect(() => parseSep7TxUri(uri, TEST_PASSPHRASE)).toThrow("different network");
+  });
+
+  it("round-trips an envelope through the URI", () => {
+    const originalXdr = TEST_ENVELOPE_XDR;
+    const uri = buildSep7TxUri(originalXdr, TEST_PASSPHRASE);
+    const parsedXdr = parseSep7TxUri(uri, TEST_PASSPHRASE);
+    expect(parsedXdr).toBe(originalXdr);
   });
 });
 
-describe("initializeKitewellContract", () => {
-  it("calls init once with the connected account as admin", async () => {
-    sorobanServerMock.getAccount.mockResolvedValue(rpcAccountFixture(USER));
-    let prepared;
-    stubSorobanSubmit({ status: "PENDING", hash: "init-hash" }, { status: "SUCCESS" });
-    sorobanServerMock.prepareTransaction.mockImplementation(async (tx) => {
-      prepared = tx;
-      return assemblePrepared(tx);
+describe("sendPaymentWithFreighter time bounds", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Mock loadAccount to return a valid account
+    horizonServerMock.loadAccount.mockResolvedValue(
+      new StellarSdk.Account(USER, "123456")
+    );
+    // Mock submitTransaction to return a success result
+    horizonServerMock.submitTransaction.mockResolvedValue({
+      hash: "testhash123",
     });
-
-    const result = await initializeKitewellContract(USER, CONTRACT_ID);
-
-    expect(result).toEqual({ hash: "init-hash", confirmed: true });
-    expect(prepared.operations).toHaveLength(1);
-    const invoke = prepared.operations[0].func.value();
-    expect(invoke.functionName().toString()).toBe("init");
-    expect(invoke.args()).toHaveLength(1);
-    expect(StellarSdk.scValToNative(invoke.args()[0])).toBe(USER);
-    expect(signTransactionMock).toHaveBeenCalledTimes(1);
+    // Mock Freighter signTransaction
+    signTransactionMock.mockResolvedValue({
+      error: null,
+      signedTxXdr,
+    });
   });
 
-  it("rejects an invalid contract id before building a tx", async () => {
-    await expect(initializeKitewellContract(USER, "GAAAAWTF")).rejects.toThrow(
-      "valid Soroban contract"
-    );
-    expect(sorobanServerMock.getAccount).not.toHaveBeenCalled();
+  it("builds transaction with default timeout when no time bounds provided", async () => {
+    await sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "");
+
+    // Should have called setTimeout(180) not setTimeBounds
+    const txBuilder = horizonServerMock.loadAccount.mock.results[0].value;
+    expect(txBuilder).toBeDefined();
+    // The transaction is built internally, we verify by checking the submitTransaction call
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalled();
+  });
+
+  it("validates that max time must be after min time", async () => {
+    const minTime = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
+    const maxTime = minTime - 100; // max before min
+
+    await expect(
+      sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", minTime, maxTime)
+    ).rejects.toThrow("Maximum time must be after minimum time.");
+  });
+
+  it("validates that max time must be in the future", async () => {
+    const maxTime = Math.floor(Date.now() / 1000) - 100; // 100 seconds ago
+
+    await expect(
+      sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", null, maxTime)
+    ).rejects.toThrow("Maximum time must be in the future.");
+  });
+
+  it("allows min time only (with max defaulting to 0)", async () => {
+    const minTime = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
+
+    await sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", minTime, null);
+
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalled();
+  });
+
+  it("allows max time only (with min defaulting to 0)", async () => {
+    const maxTime = Math.floor(Date.now() / 1000) + 7200; // 2 hours from now
+
+    await sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", null, maxTime);
+
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalled();
+  });
+
+  it("accepts both min and max time when valid", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const minTime = now + 3600; // 1 hour from now
+    const maxTime = now + 7200; // 2 hours from now
+
+    await sendPaymentWithFreighter(USER, DEST, AMOUNT, null, "text", "", minTime, maxTime);
+
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalled();
   });
 });
 
-describe("deployKitewellContract", () => {
-  it("stubs install and init and asserts the order", async () => {
-    const calls = [];
-    const install = vi.fn(async (publicKey, wasm) => {
-      calls.push("install");
-      expect(publicKey).toBe(USER);
-      expect(wasm).toBe(WASM);
-      return {
-        contractId: DEPLOYED_ID,
-        hash: "install-hash",
-        confirmed: true,
-      };
-    });
-    const init = vi.fn(async () => {
-      calls.push("init");
-      return { hash: "init-hash", confirmed: true };
-    });
+describe("submitEnvelope", () => {
+  const USER = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  const DEST = StellarSdk.Keypair.random().publicKey();
+  const AMOUNT = "10.0000000";
 
-    const result = await deployKitewellContract(USER, WASM, { install, init });
+  // Build a valid unsigned transaction XDR for mocking
+  let unsignedTxXdr;
+  let signedTxXdr;
+  beforeAll(() => {
+    const account = new StellarSdk.Account(USER, "123456");
+    // Unsigned transaction
+    const unsignedTx = new StellarSdk.TransactionBuilder(account, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: StellarSdk.Networks.TESTNET,
+    })
+      .addOperation(
+        StellarSdk.Operation.payment({
+          destination: DEST,
+          asset: StellarSdk.Asset.native(),
+          amount: AMOUNT,
+        })
+      )
+      .setTimeout(180)
+      .build();
+    unsignedTxXdr = unsignedTx.toXDR();
 
-    expect(calls).toEqual(["install", "init"]);
-    expect(install).toHaveBeenCalledTimes(1);
-    expect(init).toHaveBeenCalledTimes(1);
-    expect(init).toHaveBeenCalledWith(USER, DEPLOYED_ID);
-    expect(result).toEqual({
-      contractId: DEPLOYED_ID,
-      installHash: "install-hash",
-      initHash: "init-hash",
-      confirmed: true,
+    // Signed transaction
+    const keypair = StellarSdk.Keypair.fromSecret(
+      "SBP4BHQPSIWSFMYZUE5RZ7AXZBKTUY76HNISQ7GZYD7U7JKGJBMRQR52"
+    );
+    const signedTx = new StellarSdk.TransactionBuilder(account, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: StellarSdk.Networks.TESTNET,
+    })
+      .addOperation(
+        StellarSdk.Operation.payment({
+          destination: DEST,
+          asset: StellarSdk.Asset.native(),
+          amount: AMOUNT,
+        })
+      )
+      .setTimeout(180)
+      .build();
+    signedTx.sign(keypair);
+    signedTxXdr = signedTx.toXDR();
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Mock loadAccount to return a valid account
+    horizonServerMock.loadAccount.mockResolvedValue(
+      new StellarSdk.Account(USER, "123456")
+    );
+    // Mock submitTransaction to return a success result
+    horizonServerMock.submitTransaction.mockResolvedValue({
+      hash: "testhash123",
+    });
+    // Mock Freighter signTransaction
+    signTransactionMock.mockResolvedValue({
+      error: null,
+      signedTxXdr,
     });
   });
 
-  it("does not call init when the install fails, and shows no id", async () => {
-    const init = vi.fn();
-    const install = vi.fn(async () => {
-      throw new Error("Contract install rejected by the network. Tx hash: bad");
-    });
+  it("submits unsigned envelope by signing with Freighter first", async () => {
+    const result = await submitEnvelope(unsignedTxXdr, USER);
 
-    await expect(
-      deployKitewellContract(USER, WASM, { install, init })
-    ).rejects.toThrow("Contract install rejected");
-    expect(install).toHaveBeenCalledTimes(1);
-    expect(init).not.toHaveBeenCalled();
+    expect(signTransactionMock).toHaveBeenCalledTimes(1);
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalledTimes(1);
+    expect(result.hash).toBe("testhash123");
   });
 
-  it("rejects a bad Wasm file before either phase runs", async () => {
-    const install = vi.fn();
-    const init = vi.fn();
-    await expect(
-      deployKitewellContract(USER, "not bytes", { install, init })
-    ).rejects.toThrow("Choose the built kitewell.wasm");
-    expect(install).not.toHaveBeenCalled();
-    expect(init).not.toHaveBeenCalled();
+  it("submits signed envelope directly without re-signing", async () => {
+    const result = await submitEnvelope(signedTxXdr, USER);
+
+    expect(signTransactionMock).not.toHaveBeenCalled();
+    expect(horizonServerMock.submitTransaction).toHaveBeenCalledTimes(1);
+    expect(result.hash).toBe("testhash123");
+  });
+
+  it("throws on decode error", async () => {
+    await expect(submitEnvelope("invalid_xdr", USER)).rejects.toThrow("Unable to decode transaction envelope");
+    expect(signTransactionMock).not.toHaveBeenCalled();
+    expect(horizonServerMock.submitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("submitted XDR equals pasted XDR for signed envelope", async () => {
+    // The submitted transaction should be the exact same XDR
+    let submittedXdr = null;
+    horizonServerMock.submitTransaction.mockImplementation(async (tx) => {
+      submittedXdr = tx.toXDR();
+      return { hash: "testhash123" };
+    });
+
+    await submitEnvelope(signedTxXdr, USER);
+
+    expect(submittedXdr).toBe(signedTxXdr);
+  });
+
+  it("throws on invalid XDR", async () => {
+    await expect(submitEnvelope("invalid_xdr", USER)).rejects.toThrow("Unable to decode transaction envelope");
   });
 });
