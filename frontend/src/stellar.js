@@ -716,6 +716,54 @@ export async function getTransactionByHash(input, options = {}) {
   }, options);
 }
 
+const transactionDetailRequests = new Map();
+
+/**
+ * Read one transaction with its operations and effects from the active Horizon.
+ * Read-only. Failed transactions are included (`include_failed`). Concurrent
+ * calls for the same network and hash share one in-flight request.
+ *
+ * @param {string} input Transaction hash.
+ * @returns {Promise<{ transaction: object, operations: object[], effects: object[] }>}
+ */
+export function getTransactionDetails(input, options = {}) {
+  const hash = normaliseTxHash(input);
+  const base = getActiveNetwork().horizonUrl;
+  const key = `${base}|${hash}`;
+
+  const pending = transactionDetailRequests.get(key);
+  if (pending) return pending;
+
+  const read = async (path) => {
+    const response = await fetch(`${base}/transactions/${hash}${path}`);
+    if (response.status === 404) {
+      throw new Error("Transaction not found on this network.");
+    }
+    if (!response.ok) {
+      const error = new Error(`Could not load transaction (HTTP ${response.status}).`);
+      error.status = response.status;
+      throw error;
+    }
+    return response.json();
+  };
+
+  const request = withHorizon429Backoff(async () => {
+    const [transaction, operationPage, effectPage] = await Promise.all([
+      read(""),
+      read("/operations?limit=200&include_failed=true"),
+      read("/effects?limit=200"),
+    ]);
+    return {
+      transaction,
+      operations: operationPage?._embedded?.records || [],
+      effects: effectPage?._embedded?.records || [],
+    };
+  }, options).finally(() => transactionDetailRequests.delete(key));
+
+  transactionDetailRequests.set(key, request);
+  return request;
+}
+
 /** Deep-link into the hash status watch panel for a transaction. */
 export function statusWatchHref(hash) {
   return `#status-watch/${encodeURIComponent(hash)}`;

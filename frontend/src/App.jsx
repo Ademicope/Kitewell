@@ -69,6 +69,7 @@ import {
 import { validateAssetCode } from "./validateAssetCode";
 import { decodeTransactionEnvelope } from "./txInspector";
 import TransactionHashLookup from "./TransactionHashLookup";
+import TransactionDetailsPanel from "./TransactionDetails";
 import { completeWebAuthChallenge } from "./sep10WebAuth";
 import { loadIssuerCurrencyList } from "./issuerToml";
 import { createPaymentStreamController } from "./paymentStream";
@@ -142,6 +143,7 @@ export default function App() {
   const [pendingTransactions, setPendingTransactions] = useState([]);
   const [pendingError, setPendingError] = useState(null);
   const [nextCursor, setNextCursor] = useState(null);
+  const [selectedTxHash, setSelectedTxHash] = useState(null);
   const [loading, setLoading] = useState("");
   const [toast, setToast] = useState(null);
   const [sendForm, setSendForm] = useState({
@@ -3409,10 +3411,18 @@ export default function App() {
                     return (
                       <div
                         key={tx.id}
-                        className={`tx-item ${isOutgoing ? "tx-item--out" : "tx-item--in"}`}
+                        className={`tx-item tx-item--selectable ${isOutgoing ? "tx-item--out" : "tx-item--in"}`}
+                        onClick={() => setSelectedTxHash(tx.transaction_hash)}
                       >
                         <div className="tx-item__direction">
                           {isOutgoing ? "Sent" : "Received"}
+                          <button
+                            className="tx-item__details-btn"
+                            type="button"
+                            aria-pressed={selectedTxHash === tx.transaction_hash}
+                          >
+                            Details
+                          </button>
                         </div>
                         <div className="tx-item__amount">
                           {parseFloat(tx.amount).toLocaleString()} {tx.asset_code || "XLM"}
@@ -3427,6 +3437,7 @@ export default function App() {
                           target="_blank"
                           rel="noreferrer"
                           className="tx-item__link"
+                          onClick={(event) => event.stopPropagation()}
                         >
                           Explorer ↗
                         </a>
@@ -3444,6 +3455,12 @@ export default function App() {
                 </div>
               ) : (
                 !loading && <p className="muted">No payments yet.</p>
+              )}
+              {selectedTxHash && (
+                <TransactionDetailsPanel
+                  key={`${networkId}:${selectedTxHash}`}
+                  hash={selectedTxHash}
+                />
               )}
               {nextCursor && (
                 <div className="section__row">
