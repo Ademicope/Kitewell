@@ -660,6 +660,18 @@ body {
   flex-direction: column;
   gap: 10px;
 }
+.tx-day {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tx-day__heading {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
 .tx-item {
   display: grid;
   grid-template-columns: 1fr auto;
