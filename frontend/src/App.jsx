@@ -38,8 +38,15 @@ import {
   statusWatchHref,
   getAccountAuthConfig,
   getIssuedAssetTrustlines,
+  getOrderBook,
   IMMUTABLE_CONFIRMATION,
 } from "./stellar";
+import {
+  clearStoredOrderBookPair,
+  parseOrderBookPair,
+  readStoredOrderBookPair,
+  saveOrderBookPair,
+} from "./orderBookPair";
 import { poolShareRows } from "./poolShare";
 import { validatePaymentAmount } from "./validatePaymentAmount";
 import { fetchHealth, fetchNetworkInfo } from "./api";
@@ -72,6 +79,7 @@ const TABS = [
   "Issuer",
   "Send",
   "Path",
+  "Book",
   "History",
   "Pending",
   "Inspect",
@@ -148,6 +156,9 @@ export default function App() {
     path: "",
   });
   const [pathResult, setPathResult] = useState(null);
+  const [bookPair, setBookPair] = useState(readStoredOrderBookPair);
+  const [bookResult, setBookResult] = useState(null);
+  const bookClearGenerationRef = useRef(0);
   const [unsignedEnvelope, setUnsignedEnvelope] = useState(null);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
@@ -269,6 +280,29 @@ export default function App() {
   };
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
   const configuredContractId = labInfo?.network?.contract?.kitewell;
+  const parsedBookPair = parseOrderBookPair(bookPair);
+  const bookKey = JSON.stringify([networkId, bookPair.selling, bookPair.buying]);
+  const currentBookResult = bookResult?.key === bookKey ? bookResult : null;
+
+  useEffect(() => {
+    if (activeTab !== "Book") return;
+    const pair = parseOrderBookPair(bookPair);
+    if (!pair) return;
+
+    let cancelled = false;
+    const clearGeneration = bookClearGenerationRef.current;
+    getOrderBook(pair.selling, pair.buying)
+      .then((result) => {
+        if (cancelled || clearGeneration !== bookClearGenerationRef.current) return;
+        setBookResult({ key: bookKey, data: result });
+        saveOrderBookPair(bookPair);
+      })
+      .catch((error) => {
+        if (cancelled || clearGeneration !== bookClearGenerationRef.current) return;
+        setBookResult({ key: bookKey, error: error.message || "Could not load the order book." });
+      });
+    return () => { cancelled = true; };
+  }, [activeTab, bookPair, bookKey]);
 
   useEffect(() => {
     checkFreighterInstalled().then(setFreighterInstalled);
@@ -2430,6 +2464,67 @@ export default function App() {
               )}
 
               {txWatchPanel}
+            </div>
+          )}
+
+          {activeTab === "Book" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Order book</h2>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={() => {
+                    bookClearGenerationRef.current += 1;
+                    clearStoredOrderBookPair();
+                    setBookPair({ selling: "", buying: "" });
+                  }}
+                >
+                  Clear pair
+                </button>
+              </div>
+              <p className="muted">Enter XLM or CODE:ISSUER for each asset.</p>
+              <div className="form">
+                <label className="label" htmlFor="book-selling">Selling asset</label>
+                <input
+                  id="book-selling"
+                  className="input"
+                  type="text"
+                  placeholder="XLM"
+                  value={bookPair.selling}
+                  onChange={(event) => setBookPair((pair) => ({ ...pair, selling: event.target.value }))}
+                />
+                <label className="label" htmlFor="book-buying">Buying asset</label>
+                <input
+                  id="book-buying"
+                  className="input"
+                  type="text"
+                  placeholder="USDC:G…"
+                  value={bookPair.buying}
+                  onChange={(event) => setBookPair((pair) => ({ ...pair, buying: event.target.value }))}
+                />
+              </div>
+              {!parsedBookPair && (
+                <p className="muted">Choose two different valid assets to load the book.</p>
+              )}
+              {parsedBookPair && !currentBookResult && (
+                <p className="muted" role="status">Loading order book…</p>
+              )}
+              {currentBookResult?.error && (
+                <p className="muted" role="alert">{currentBookResult.error}</p>
+              )}
+              {currentBookResult?.data && (
+                <div className="info-box">
+                  <strong>Asks</strong>
+                  {currentBookResult.data.asks?.length ? currentBookResult.data.asks.slice(0, 10).map((offer, index) => (
+                    <span key={index}>Price {offer.price} · Amount {offer.amount}</span>
+                  )) : <span className="muted">No asks</span>}
+                  <strong>Bids</strong>
+                  {currentBookResult.data.bids?.length ? currentBookResult.data.bids.slice(0, 10).map((offer, index) => (
+                    <span key={index}>Price {offer.price} · Amount {offer.amount}</span>
+                  )) : <span className="muted">No bids</span>}
+                </div>
+              )}
             </div>
           )}
 
