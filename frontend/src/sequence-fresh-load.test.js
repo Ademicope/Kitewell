@@ -17,6 +17,11 @@ vi.mock("@stellar/freighter-api", () => ({
   setAllowed: vi.fn(),
   getAddress: vi.fn(),
   getNetwork: vi.fn(),
+  getNetwork: vi.fn(async () => {
+    const { getActiveNetwork } = await import("./network");
+    const active = getActiveNetwork();
+    return { network: active.id, networkPassphrase: active.passphrase };
+  }),
   signTransaction: signTransactionMock,
 }));
 
