@@ -78,9 +78,12 @@ import { fetchHealth, fetchLatestHorizonLedger, fetchNetworkInfo } from "./api";
 import { decodeEnvelope, formatArgumentValue } from "./envelopeDecoder";
 import { formatSimulationFee } from "./simulationFees";
 import {
-  NETWORKS,
+  getActiveNetwork,
   getActiveNetworkId,
+  getAvailableNetworks,
   isFriendbotAvailable,
+  removeCustomNetwork,
+  saveCustomNetwork,
   setActiveNetwork,
 } from "./network";
 import { validateAssetCode } from "./validateAssetCode";
@@ -173,6 +176,12 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("Wallet");
   const [publicKey, setPublicKey] = useState(null);
   const [networkId, setNetworkId] = useState(getActiveNetworkId());
+  const [customNetworkForm, setCustomNetworkForm] = useState({
+    name: "",
+    horizonUrl: "",
+    rpcUrl: "",
+    passphrase: "",
+  });
   const [freighterInstalled, setFreighterInstalled] = useState(null);
   const [balances, setBalances] = useState([]);
   const [hideZeroCreditAssets, setHideZeroCreditAssets] = useState(
@@ -411,7 +420,7 @@ export default function App() {
   );
   const poolShares = poolShareRows(balances, liquidityPools);
   const memoField = MEMO_FIELDS[sendForm.memoType];
-  const activeNetwork = NETWORKS[networkId];
+  const activeNetwork = getActiveNetwork();
   const friendbotAvailable = isFriendbotAvailable();
   const pathModeField = PATH_MODE_FIELDS[pathForm.mode];
   const pathSendAsset = {
@@ -887,6 +896,24 @@ export default function App() {
     } catch (e) {
       showToast(e.message || "Could not switch network.", "error");
     }
+  };
+
+  const handleSaveCustomNetwork = (event) => {
+    event.preventDefault();
+    try {
+      const network = saveCustomNetwork(customNetworkForm);
+      handleNetworkChange(network.id);
+      showToast(`Saved and selected ${network.label}.`, "info");
+    } catch (error) {
+      showToast(error.message || "Could not save custom network.", "error");
+    }
+  };
+
+  const handleRemoveCustomNetwork = () => {
+    const network = removeCustomNetwork();
+    setNetworkId(network.id);
+    setCustomNetworkForm({ name: "", horizonUrl: "", rpcUrl: "", passphrase: "" });
+    showToast("Custom network removed. Switched to Testnet.", "info");
   };
 
   const refreshPending = useCallback(async () => {
@@ -2864,7 +2891,7 @@ export default function App() {
             <span className="header__tag">Stellar {activeNetwork.label} lab</span>
           </div>
         </div>
-        <label className="network" htmlFor="network-select">
+        <div className="network">
           <span className="eyebrow">Network</span>
           <select
             id="network-select"
@@ -2873,14 +2900,76 @@ export default function App() {
             onChange={(e) => handleNetworkChange(e.target.value)}
             aria-label="Stellar network"
           >
-            {Object.values(NETWORKS).map((network) => (
+            {getAvailableNetworks().map((network) => (
               <option key={network.id} value={network.id}>
                 {network.label}
               </option>
             ))}
           </select>
-        </label>
-        <LatestLedgerHeader networkId={networkId} />
+          <details className="network__custom">
+            <summary>Custom network</summary>
+            <form className="form" onSubmit={handleSaveCustomNetwork}>
+              <input
+                className="input input--compact"
+                aria-label="Custom network name"
+                placeholder="Network name"
+                value={customNetworkForm.name}
+                onChange={(event) => setCustomNetworkForm((current) => ({
+                  ...current,
+                  name: event.target.value,
+                }))}
+                required
+              />
+              <input
+                className="input input--compact"
+                aria-label="Custom Horizon URL"
+                placeholder="https://horizon.example"
+                value={customNetworkForm.horizonUrl}
+                onChange={(event) => setCustomNetworkForm((current) => ({
+                  ...current,
+                  horizonUrl: event.target.value,
+                }))}
+                required
+              />
+              <input
+                className="input input--compact"
+                aria-label="Custom RPC URL"
+                placeholder="https://rpc.example"
+                value={customNetworkForm.rpcUrl}
+                onChange={(event) => setCustomNetworkForm((current) => ({
+                  ...current,
+                  rpcUrl: event.target.value,
+                }))}
+                required
+              />
+              <input
+                className="input input--compact"
+                aria-label="Custom network passphrase"
+                placeholder="Network passphrase"
+                value={customNetworkForm.passphrase}
+                onChange={(event) => setCustomNetworkForm((current) => ({
+                  ...current,
+                  passphrase: event.target.value,
+                }))}
+                required
+              />
+              <div className="section__row">
+                <button className="btn btn--secondary btn--sm" type="submit">
+                  Save custom network
+                </button>
+                {getAvailableNetworks().some((network) => network.id === "CUSTOM") && (
+                  <button
+                    className="btn btn--secondary btn--sm"
+                    type="button"
+                    onClick={handleRemoveCustomNetwork}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            </form>
+          </details>
+        </div>
       </header>
 
       <main className="main">

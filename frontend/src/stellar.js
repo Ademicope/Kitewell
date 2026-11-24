@@ -75,11 +75,17 @@ function backendIsUsable() {
 }
 
 export function explorerAccountUrl(publicKey) {
-  return `${getActiveNetwork().explorerBase}/account/${publicKey}`;
+  const network = getActiveNetwork();
+  return network.explorerBase
+    ? `${network.explorerBase}/account/${publicKey}`
+    : `${network.horizonUrl}/accounts/${publicKey}`;
 }
 
 export function explorerTxUrl(hash) {
-  return `${getActiveNetwork().explorerBase}/tx/${hash}`;
+  const network = getActiveNetwork();
+  return network.explorerBase
+    ? `${network.explorerBase}/tx/${hash}`
+    : `${network.horizonUrl}/transactions/${hash}`;
 }
 
 /**

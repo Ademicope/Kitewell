@@ -1,6 +1,5 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
-import { NETWORKS, getActiveNetworkId } from "./network";
-import { mapTransactionFee } from "./historyFee";
+import { getActiveNetworkId, getNetworkById } from "./network";
 
 /**
  * Stream payments for the connected account while the history tab is open.
@@ -152,7 +151,7 @@ export function openPaymentsStream({
 }
 
 function defaultHorizonUrlFor(networkId) {
-  const network = NETWORKS[networkId];
+  const network = getNetworkById(networkId);
   if (!network) throw new Error(`Unsupported network: ${networkId}`);
   return network.horizonUrl;
 }

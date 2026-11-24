@@ -56,7 +56,27 @@ export const TRANSACTION_FEE_STROOPS = StellarSdk.BASE_FEE;
 
 /** Public Stellar RPC endpoint for Soroban reads + invokes (Testnet). */
 export const SOROBAN_RPC_URL = "https://soroban-testnet.stellar.org";
-const sorobanRpc = new StellarSdk.rpc.Server(SOROBAN_RPC_URL);
+let activeRpcUrl;
+let activeRpcServer;
+
+function getActiveRpcServer() {
+  const rpcUrl = getActiveNetwork().rpcUrl || SOROBAN_RPC_URL;
+  if (!activeRpcServer || activeRpcUrl !== rpcUrl) {
+    activeRpcUrl = rpcUrl;
+    activeRpcServer = new StellarSdk.rpc.Server(rpcUrl);
+  }
+  return activeRpcServer;
+}
+
+// Keep existing call sites small while resolving the selected network's RPC
+// at method access time. Switching networks invalidates the cached server.
+const sorobanRpc = new Proxy({}, {
+  get(_target, property) {
+    const server = getActiveRpcServer();
+    const value = server[property];
+    return typeof value === "function" ? value.bind(server) : value;
+  },
+});
 
 /** One event replay read returns at most this many events. */
 export const MAX_KITEWELL_EVENTS = 200;
