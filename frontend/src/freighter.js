@@ -15,6 +15,7 @@ import {
   MAX_ASSET_CODE_LENGTH,
 } from "./stellar";
 import { parseHorizonError } from "./horizonErrorParse";
+import { parseSimulationFees } from "./simulationFees";
 import {
   HORIZON_FAILURE_CODE,
   freighterCancelledError,
@@ -465,6 +466,7 @@ export async function buildUnsignedEnvelope(
     throw new Error("Add at least one operation before building an envelope.");
   }
 
+  // Load the account immediately before building so a stale sequence is refused.
   const sourceAccount = await getServer().loadAccount(publicKey);
   const txBuilder = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: StellarSdk.BASE_FEE,
@@ -609,6 +611,7 @@ export async function pathPaymentWithFreighter({
         path: intermediatePath,
       });
 
+  // Load the account immediately before building so a stale sequence is refused.
   const sourceAccount = await getServer().loadAccount(publicKey);
   const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: StellarSdk.BASE_FEE,
@@ -639,6 +642,7 @@ export async function changeTrustWithFreighter(
   }
 
   const asset = new StellarSdk.Asset(assetCode.toUpperCase(), assetIssuer);
+  // Load the account immediately before building so a stale sequence is refused.
   const sourceAccount = await getServer().loadAccount(publicKey);
   const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: StellarSdk.BASE_FEE,
@@ -668,6 +672,7 @@ export async function setAccountOptionsWithFreighter(publicKey, options = {}) {
   }
 
   const body = buildSetOptionsBody(options);
+  // Load the account immediately before building so a stale sequence is refused.
   const sourceAccount = await getServer().loadAccount(publicKey);
   const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: StellarSdk.BASE_FEE,
@@ -706,6 +711,7 @@ export async function allowTrustWithFreighter(
     throw new Error(`Asset code must be 1–${MAX_ASSET_CODE_LENGTH} characters.`);
   }
 
+  // Load the account immediately before building so a stale sequence is refused.
   const sourceAccount = await getServer().loadAccount(publicKey);
   const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: StellarSdk.BASE_FEE,
@@ -944,4 +950,182 @@ export async function readKitewellEvents(contractId, options = {}) {
     cursor: response.cursor ?? null,
     latestLedger: response.latestLedger ?? null,
   };
+}
+
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * Read the TTL for a contract instance and its Wasm code from the ledger.
+ *
+ * @param {string} contractId Contract address (C…)
+ * @returns {Promise<{ instanceTTL: number|null, codeTTL: number|null, wasmHash: string|null, currentLedger: number }>}
+ */
+export async function readContractTTL(contractId) {
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error("Contract ID must be a valid Soroban contract strkey (C…).");
+  }
+
+  const contractKey = StellarSdk.xdr.LedgerKey.contractData(
+    new StellarSdk.xdr.LedgerKeyContractData({
+      contract: StellarSdk.Address.fromString(contractId).toScAddress(),
+      key: StellarSdk.xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: StellarSdk.xdr.ContractDataDurability.persistent(),
+    })
+  );
+
+  const ledgerResponse = await sorobanRpc.getLatestLedger();
+  const currentLedger = ledgerResponse.sequence;
+
+  let instanceTTL = null;
+  let codeTTL = null;
+  let wasmHash = null;
+
+  try {
+    const entryResponse = await sorobanRpc.getLedgerEntries(contractKey);
+    if (entryResponse.entries && entryResponse.entries.length > 0) {
+      const entry = entryResponse.entries[0];
+      instanceTTL = entry.liveUntilLedgerSeq || null;
+
+      if (entry.val) {
+        const ledgerEntryData = StellarSdk.xdr.LedgerEntryData.fromXDR(entry.val, "base64");
+        if (ledgerEntryData.switch() === StellarSdk.xdr.LedgerEntryType.contractData()) {
+          const contractData = ledgerEntryData.contractData();
+          const val = contractData.val();
+          if (val.switch() === StellarSdk.xdr.ScValType.scvContractInstance()) {
+            const instance = val.instance();
+            const executable = instance.executable();
+            if (executable.switch() === StellarSdk.xdr.ContractExecutableType.contractExecutableWasm()) {
+              wasmHash = executable.wasmHash().toString("hex");
+
+              const codeKey = StellarSdk.xdr.LedgerKey.contractCode(
+                new StellarSdk.xdr.LedgerKeyContractCode({
+                  hash: executable.wasmHash(),
+                })
+              );
+
+              const codeResponse = await sorobanRpc.getLedgerEntries(codeKey);
+              if (codeResponse.entries && codeResponse.entries.length > 0) {
+                codeTTL = codeResponse.entries[0].liveUntilLedgerSeq || null;
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Error reading TTL:", err);
+  }
+
+  return { instanceTTL, codeTTL, wasmHash, currentLedger };
+}
+
+/**
+ * Extend the instance TTL of a Soroban contract.
+ *
+ * @param {string} publicKey Source account
+ * @param {string} contractId Contract address (C…)
+ * @param {number} extendTo New TTL ledger deadline
+ * @returns {Promise<{ hash: string, deadline: number }>}
+ */
+export async function extendInstanceTTL(publicKey, contractId, extendTo) {
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error("Contract ID must be a valid Soroban contract strkey (C…).");
+  }
+
+  const { currentLedger } = await readContractTTL(contractId);
+  if (extendTo <= currentLedger) {
+    throw new Error("TTL deadline must be in the future.");
+  }
+
+  const sourceAccount = await sorobanRpc.getAccount(publicKey);
+  const contractKey = StellarSdk.xdr.LedgerKey.contractData(
+    new StellarSdk.xdr.LedgerKeyContractData({
+      contract: StellarSdk.Address.fromString(contractId).toScAddress(),
+      key: StellarSdk.xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: StellarSdk.xdr.ContractDataDurability.persistent(),
+    })
+  );
+
+  const sorobanData = new StellarSdk.SorobanDataBuilder().setReadOnly([contractKey]).build();
+
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .setSorobanData(sorobanData)
+    .addOperation(
+      StellarSdk.Operation.extendFootprintTtl({
+        extendTo: extendTo - currentLedger,
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  const prepared = await sorobanRpc.prepareTransaction(transaction);
+  const signedTx = await signWithFreighter(prepared.toXDR(), publicKey);
+  const result = await sorobanRpc.sendTransaction(signedTx);
+
+  if (result.status === "ERROR") {
+    throw new Error("Instance TTL extension rejected by the network.");
+  }
+
+  return { hash: result.hash, deadline: extendTo };
+}
+
+/**
+ * Extend the code TTL of a Soroban contract's Wasm, separate from the instance.
+ *
+ * @param {string} publicKey Source account
+ * @param {string} wasmHash Hex-encoded Wasm hash
+ * @param {number} extendTo New TTL ledger deadline
+ * @param {number} currentLedger Latest ledger sequence
+ * @returns {Promise<{ hash: string, deadline: number }>}
+ */
+export async function extendCodeTTL(publicKey, wasmHash, extendTo, currentLedger) {
+  if (!wasmHash || !/^[0-9a-fA-F]{64}$/.test(wasmHash)) {
+    throw new Error("Wasm hash must be exactly 64 hexadecimal characters.");
+  }
+
+  if (extendTo <= currentLedger) {
+    throw new Error("TTL deadline must be in the future.");
+  }
+
+  const sourceAccount = await sorobanRpc.getAccount(publicKey);
+  const codeKey = StellarSdk.xdr.LedgerKey.contractCode(
+    new StellarSdk.xdr.LedgerKeyContractCode({
+      hash: hexToBytes(wasmHash),
+    })
+  );
+
+  const sorobanData = new StellarSdk.SorobanDataBuilder().setReadOnly([codeKey]).build();
+
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .setSorobanData(sorobanData)
+    .addOperation(
+      StellarSdk.Operation.extendFootprintTtl({
+        extendTo: extendTo - currentLedger,
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  const prepared = await sorobanRpc.prepareTransaction(transaction);
+  const signedTx = await signWithFreighter(prepared.toXDR(), publicKey);
+  const result = await sorobanRpc.sendTransaction(signedTx);
+
+  if (result.status === "ERROR") {
+    throw new Error("Code TTL extension rejected by the network.");
+  }
+
+  return { hash: result.hash, deadline: extendTo };
 }
