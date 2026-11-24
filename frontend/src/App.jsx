@@ -9,7 +9,7 @@ import {
   pathPaymentWithFreighter,
   changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
-  clawbackClaimableBalanceWithFreighter,
+  manageDataWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
   readAdminState,
@@ -43,7 +43,7 @@ import {
   getLiquidityPool,
   getLatestBaseReserve,
   getTransactions,
-  streamAccountEffects,
+  formatDataValue,
   explorerAccountUrl,
   explorerTxUrl,
   resolveFederationAddress,
@@ -219,7 +219,60 @@ export default function App() {
   const tabRefs = useRef([]);
   const horizonAbortRef = useRef(null);
   const [accountDetails, setAccountDetails] = useState(null);
-  const [resolvedFederation, setResolvedFederation] = useState(null);
+  const [dataForm, setDataForm] = useState({ name: "", value: "" });
+  const [failedSubmits, setFailedSubmits] = useState([]);
+  const failedSubmitLogRef = useRef(createFailedSubmitLog());
+  const [webAuthForm, setWebAuthForm] = useState({ endpoint: "", serverAccount: "" });
+  const [webAuthResult, setWebAuthResult] = useState(null);
+  const [webAuthError, setWebAuthError] = useState(null);
+  const [issuerInput, setIssuerInput] = useState("");
+  const [issuerResult, setIssuerResult] = useState(null);
+  const [issuerError, setIssuerError] = useState(null);
+  const [streamedPayments, setStreamedPayments] = useState([]);
+  const [streamState, setStreamState] = useState(null);
+  const [txWatch, setTxWatch] = useState(null);
+  const [txWatchError, setTxWatchError] = useState(null);
+  const [hashForm, setHashForm] = useState("");
+  const [hashError, setHashError] = useState(null);
+  const streamSessionRef = useRef(null);
+  const watchTokenRef = useRef(0);
+
+  // Issue #512: the controller owns the streamed payments and their paging
+  // tokens, so a duplicate event can never reach the list twice; this only
+  // mirrors its state into React.
+  const paymentStream = useMemo(
+    () =>
+      createPaymentStreamController({
+        onChange: (records, state) => {
+          setStreamedPayments(records);
+          setStreamState(state);
+        },
+      }),
+    []
+  );
+
+  // Issuer auth flags + trustlines the connected account issued.
+  const [issuerConfig, setIssuerConfig] = useState(null);
+  const [issuerConfigError, setIssuerConfigError] = useState(null);
+  const [issuerForm, setIssuerForm] = useState({
+    homeDomain: "",
+    authRequired: false,
+    authRevocable: false,
+    authImmutable: false,
+    confirmation: "",
+  });
+  const [issuedTrustlines, setIssuedTrustlines] = useState([]);
+  const [issuedTrustlinesError, setIssuedTrustlinesError] = useState(null);
+
+  // Contract instance TTL + event tail in the Lab tab.
+  const [ttlInfo, setTtlInfo] = useState(null);
+  const [ttlError, setTtlError] = useState(null);
+  const [ttlForm, setTtlForm] = useState({ extendTo: "" });
+  const [ttlResult, setTtlResult] = useState(null);
+  const [labEvents, setLabEvents] = useState([]);
+  const [labEventsError, setLabEventsError] = useState(null);
+  const eventCursorRef = useRef(null);
+  const eventStartLedgerRef = useRef(null);
 
   const showToast = (message, type = "success", explorerUrl = null) => {
     setToast({ message, type, explorerUrl });
@@ -508,6 +561,47 @@ export default function App() {
     }
   };
 
+  const refreshAccountDetails = async () => {
+    if (!publicKey) return;
+    try {
+      setAccountDetails(await getAccountDetails(publicKey));
+    } catch {
+      setAccountDetails(null);
+    }
+  };
+
+  const handleSetData = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!dataForm.name) return showToast("Data name is required.", "error");
+
+    setLoading("data-set");
+    try {
+      await manageDataWithFreighter(publicKey, dataForm.name, dataForm.value);
+      setDataForm({ name: "", value: "" });
+      await refreshAccountDetails();
+      showToast("Account data submitted.");
+    } catch (err) {
+      showToast(err.message || "Could not set account data.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleClearData = async (name) => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading(`data-clear-${name}`);
+    try {
+      await manageDataWithFreighter(publicKey, name, null);
+      await refreshAccountDetails();
+      showToast(`Cleared account data "${name}".`);
+    } catch (err) {
+      showToast(err.message || `Could not clear "${name}".`, "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
   const handleConnect = async () => {
     setLoading("connect");
     try {
@@ -531,11 +625,7 @@ export default function App() {
         /* unfunded until Friendbot */
       }
       try {
-        const details = await getAccountDetails(address);
-        setAccountDetails(details);
-        if (Number.isInteger(details.subentryCount)) {
-          setReserveSubentryCount(String(details.subentryCount));
-        }
+        setAccountDetails(await getAccountDetails(address));
       } catch {
         setAccountDetails(null);
       }
@@ -2532,42 +2622,62 @@ export default function App() {
                       </a>
                     </div>
                   )}
-                  <div className="section">
-                    <h3 className="subhead">Account effects</h3>
-                    <p className="muted">
-                      Trustlines, trades, offers, and account credits/debits stream here while
-                      this panel is open.
-                    </p>
-                    {effectsError && <p className="muted">{effectsError}</p>}
-                    {accountEffects.length > 0 ? (
-                      <ul className="balance-list">
-                        {accountEffects.map((effect, index) => {
-                          const labelled = labelEffect(effect);
-                          return (
-                            <li
-                              key={
-                                effect.paging_token ??
-                                effect.id ??
-                                `${labelled.type}-${index}`
-                              }
-                              className="balance-row"
-                            >
-                              <div>
-                                <strong>{labelled.type}</strong>
-                                {labelled.label && (
-                                  <span className="muted balance-row__issuer">
-                                    {labelled.label}
-                                  </span>
-                                )}
+                  {accountDetails && (
+                    <div className="info-box">
+                      <span className="eyebrow">Manage data</span>
+                      {accountDetails.dataEntries?.length ? (
+                        <ul className="data-list">
+                          {accountDetails.dataEntries.map((entry) => (
+                            <li className="data-row" key={entry.name}>
+                              <div className="data-row__content">
+                                <span className="metadata-label">{entry.name}</span>
+                                <code>{formatDataValue(entry.value)}</code>
                               </div>
+                              <button
+                                className="btn btn--secondary btn--sm"
+                                type="button"
+                                onClick={() => handleClearData(entry.name)}
+                                disabled={loading === `data-clear-${entry.name}`}
+                              >
+                                Clear
+                              </button>
                             </li>
-                          );
-                        })}
-                      </ul>
-                    ) : (
-                      <p className="muted">No effects yet.</p>
-                    )}
-                  </div>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="muted">No account data entries.</p>
+                      )}
+                      <form className="form data-form" onSubmit={handleSetData}>
+                        <label className="label" htmlFor="data-name">Name</label>
+                        <input
+                          id="data-name"
+                          className="input"
+                          value={dataForm.name}
+                          onChange={(e) =>
+                            setDataForm((prev) => ({ ...prev, name: e.target.value }))
+                          }
+                          placeholder="Up to 64 UTF-8 bytes"
+                        />
+                        <label className="label" htmlFor="data-value">Value</label>
+                        <input
+                          id="data-value"
+                          className="input"
+                          value={dataForm.value}
+                          onChange={(e) =>
+                            setDataForm((prev) => ({ ...prev, value: e.target.value }))
+                          }
+                          placeholder="Up to 64 UTF-8 bytes"
+                        />
+                        <button
+                          className="btn btn--primary"
+                          type="submit"
+                          disabled={loading === "data-set"}
+                        >
+                          Set data
+                        </button>
+                      </form>
+                    </div>
+                  )}
                   <button className="btn btn--secondary" type="button" onClick={handleDisconnect}>
                     Disconnect
                   </button>

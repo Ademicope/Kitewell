@@ -191,6 +191,7 @@ test("GET /api/account/:address maps a Horizon account into the API body", async
         limit: "1000.0000000",
       },
     ],
+    data_attr: { z: "eg==", a: "aGVsbG8=" },
   });
   const { get, stub } = await boot(t, {
     horizon: stubHorizon({ account }),
@@ -225,6 +226,10 @@ test("GET /api/account/:address maps a Horizon account into the API body", async
         isAuthorizedToMaintainLiabilities: null,
         clawbackEnabled: null,
       },
+    ],
+    dataEntries: [
+      { name: "a", value: "aGVsbG8=" },
+      { name: "z", value: "eg==" },
     ],
     explorerUrl: `https://explorer.test.invalid/account/${VALID_ADDRESS}`,
   });

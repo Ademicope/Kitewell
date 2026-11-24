@@ -159,7 +159,10 @@ export function createApp({ horizon, env = process.env } = {}) {
         subentryCount: account.subentry_count,
         thresholds: account.thresholds,
         balances,
-        explorerUrl: `${network.explorerBase}/account/${address}`,
+        dataEntries: Object.entries(account.data_attr || {})
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([name, value]) => ({ name, value })),
+        explorerUrl: `${EXPLORER_BASE}/account/${address}`,
       });
     } catch (err) {
       const status = err?.response?.status || 404;

@@ -625,6 +625,36 @@ body {
   word-break: break-word;
 }
 
+.data-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+.data-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(7, 10, 16, 0.25);
+}
+.data-row__content {
+  min-width: 0;
+}
+.data-row__content code {
+  display: block;
+  max-width: 360px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.data-form {
+  margin-top: 8px;
+}
+
 .tx-list {
   display: flex;
   flex-direction: column;

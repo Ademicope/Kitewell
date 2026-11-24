@@ -71,12 +71,11 @@ const {
   getBalance,
   getLatestBaseReserve,
   getTransactions,
-  getOrderBook,
+  formatDataValue,
+  mapAccountDataEntries,
   parsePathAssets,
-  withHorizon429Backoff,
-  resetHorizon429BackoffForTests,
-  HORIZON_SLOWDOWN_MESSAGE,
-  computeHorizon429WaitSeconds,
+  validateDataName,
+  validateDataValue,
 } = await import("./stellar");
 
 /** Minimal Horizon account payload: 3.5 XLM + an issued asset. */
@@ -431,132 +430,36 @@ describe("balance mapping", () => {
   });
 });
 
-describe("Horizon 429 backoff", () => {
-  function horizon429(retryAfter) {
-    const error = new Error("Too Many Requests");
-    error.response = {
-      status: 429,
-      headers: retryAfter == null ? {} : { "retry-after": String(retryAfter) },
-    };
-    return error;
-  }
-
-  it("stubs two 429s and asserts the second wait is longer", async () => {
-    const waits = [];
-    const sleep = vi.fn(async (ms) => {
-      waits.push(ms);
-    });
-
-    const read = vi
-      .fn()
-      .mockRejectedValueOnce(horizon429())
-      .mockRejectedValueOnce(horizon429());
-
-    await expect(withHorizon429Backoff(read, { sleep })).rejects.toThrow(
-      HORIZON_SLOWDOWN_MESSAGE
-    );
-    await expect(withHorizon429Backoff(read, { sleep })).rejects.toThrow(
-      HORIZON_SLOWDOWN_MESSAGE
-    );
-
-    expect(waits).toEqual([2000, 4000]);
-    expect(waits[1]).toBeGreaterThan(waits[0]);
-    expect(computeHorizon429WaitSeconds(1)).toBe(2);
-    expect(computeHorizon429WaitSeconds(2)).toBe(4);
-    expect(computeHorizon429WaitSeconds(5)).toBe(30);
+describe("account data helpers", () => {
+  it("maps and sorts account data entries", () => {
+    expect(mapAccountDataEntries({ data_attr: { z: "eg==", a: "aGVsbG8=" } })).toEqual([
+      { name: "a", value: "aGVsbG8=" },
+      { name: "z", value: "eg==" },
+    ]);
   });
 
-  it("prefers Retry-After when Horizon sends it", async () => {
-    const waits = [];
-    const sleep = vi.fn(async (ms) => {
-      waits.push(ms);
-    });
-
-    await expect(
-      withHorizon429Backoff(() => Promise.reject(horizon429(7)), { sleep })
-    ).rejects.toThrow(HORIZON_SLOWDOWN_MESSAGE);
-
-    expect(waits).toEqual([7000]);
-  });
-
-  it("resets the shared backoff clock after a successful read", async () => {
-    const waits = [];
-    const sleep = vi.fn(async (ms) => {
-      waits.push(ms);
-    });
-
-    await expect(
-      withHorizon429Backoff(() => Promise.reject(horizon429()), { sleep })
-    ).rejects.toThrow(HORIZON_SLOWDOWN_MESSAGE);
-
-    await expect(
-      withHorizon429Backoff(async () => "ok", { sleep })
-    ).resolves.toBe("ok");
-
-    await expect(
-      withHorizon429Backoff(() => Promise.reject(horizon429()), { sleep })
-    ).rejects.toThrow(HORIZON_SLOWDOWN_MESSAGE);
-
-    expect(waits).toEqual([2000, 2000]);
-  });
-
-  it("does not apply 429 backoff to a 500", async () => {
-    const sleep = vi.fn(async () => {});
-    const serverError = new Error("Internal Server Error");
-    serverError.response = { status: 500 };
-
-    await expect(
-      withHorizon429Backoff(() => Promise.reject(serverError), { sleep })
-    ).rejects.toThrow("Internal Server Error");
-    expect(sleep).not.toHaveBeenCalled();
-  });
-
-  it("cancels the wait when the signal aborts", async () => {
-    const controller = new AbortController();
-    const sleep = vi.fn(
-      (_ms, signal) =>
-        new Promise((_, reject) => {
-          signal.addEventListener(
-            "abort",
-            () => {
-              const error = new Error("Aborted");
-              error.name = "AbortError";
-              reject(error);
-            },
-            { once: true }
-          );
-          controller.abort();
-        })
-    );
-
-    await expect(
-      withHorizon429Backoff(() => Promise.reject(horizon429()), {
-        signal: controller.signal,
-        sleep,
+  it("reads the Horizon AccountResponse data method", () => {
+    expect(
+      mapAccountDataEntries({
+        data_attr: undefined,
+        data: () => ({ z: "eg==", a: "aGVsbG8=" }),
       })
-    ).rejects.toMatchObject({ name: "AbortError" });
+    ).toEqual([
+      { name: "a", value: "aGVsbG8=" },
+      { name: "z", value: "eg==" },
+    ]);
   });
 
-  it("lets two Horizon callers share one backoff clock per network", async () => {
-    const waits = [];
-    const sleep = vi.fn(async (ms) => {
-      waits.push(ms);
-    });
+  it("shows valid UTF-8 text and hex for invalid UTF-8", () => {
+    expect(formatDataValue("aGVsbG8=")).toBe("hello");
+    expect(formatDataValue("/w==")).toBe("ff");
+  });
 
-    fetchAccountViaApi.mockRejectedValue(new Error("backend down"));
-    fetchPaymentsViaApi.mockRejectedValue(new Error("backend down"));
-    loadAccountMock.mockRejectedValue(horizon429());
-    paymentsCallMock.mockRejectedValue(horizon429());
-
-    await expect(
-      getAccountBalances("GTEST", { sleep })
-    ).rejects.toThrow(HORIZON_SLOWDOWN_MESSAGE);
-    await expect(
-      getTransactions("GTEST", 15, undefined, { sleep })
-    ).rejects.toThrow(HORIZON_SLOWDOWN_MESSAGE);
-
-    expect(waits).toEqual([2000, 4000]);
-    expect(waits[1]).toBeGreaterThan(waits[0]);
+  it("checks data names and values by UTF-8 byte length", () => {
+    expect(validateDataName("é".repeat(32))).toBe("é".repeat(32));
+    expect(() => validateDataName("é".repeat(33))).toThrow(/64 UTF-8 bytes/);
+    expect(validateDataValue("é".repeat(32))).toBe("é".repeat(32));
+    expect(() => validateDataValue("é".repeat(33))).toThrow(/64 UTF-8 bytes/);
   });
 });
 

@@ -103,6 +103,77 @@ export async function getFeeStats() {
 }
 
 export const MAX_ASSET_CODE_LENGTH = 12;
+export const MAX_DATA_NAME_BYTES = 64;
+export const MAX_DATA_VALUE_BYTES = 64;
+
+export function utf8ByteLength(value) {
+  return new TextEncoder().encode(value == null ? "" : String(value)).length;
+}
+
+export function validateDataName(name) {
+  const normalized = String(name ?? "");
+  if (!normalized) throw new Error("Data name is required.");
+  if (utf8ByteLength(normalized) > MAX_DATA_NAME_BYTES) {
+    throw new Error("Data name must be 64 UTF-8 bytes or fewer.");
+  }
+  return normalized;
+}
+
+export function validateDataValue(value) {
+  const normalized = value == null ? "" : String(value);
+  if (utf8ByteLength(normalized) > MAX_DATA_VALUE_BYTES) {
+    throw new Error("Data value must be 64 UTF-8 bytes or fewer.");
+  }
+  return normalized;
+}
+
+export function formatDataValue(value) {
+  if (value == null) return "";
+
+  let bytes;
+  if (typeof value === "string") {
+    try {
+      const binary = atob(value);
+      bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    } catch {
+      bytes = new TextEncoder().encode(value);
+    }
+  } else if (value instanceof Uint8Array) {
+    bytes = value;
+  } else {
+    bytes = new TextEncoder().encode(String(value));
+  }
+
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+}
+
+export function mapAccountDataEntries(account) {
+  if (Array.isArray(account?.dataEntries)) {
+    return account.dataEntries
+      .filter((entry) => entry && typeof entry.name === "string")
+      .map((entry) => ({ name: entry.name, value: entry.value }));
+  }
+
+  let data = account?.data_attr;
+  if ((!data || typeof data !== "object") && typeof account?.data === "function") {
+    data = account.data();
+  } else if ((!data || typeof data !== "object") && account?.data && typeof account.data === "object") {
+    data = account.data;
+  }
+  if (!data || typeof data !== "object") return [];
+  return Object.entries(data)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => ({ name, value }));
+}
+
+export const getAccountDataEntries = mapAccountDataEntries;
+export const formatAccountDataValue = formatDataValue;
+export const validateManageDataName = validateDataName;
+export const validateManageDataValue = validateDataValue;
 
 /** Stellar account flag bits (from Stellar's `AccountFlags`). */
 export const ACCOUNT_FLAG_BITS = {
@@ -530,6 +601,7 @@ export async function getAccountDetails(publicKey, options = {}) {
     thresholds: account.thresholds,
     signers: account.signers,
     balances: mapHorizonBalances(account),
+    dataEntries: mapAccountDataEntries(account),
     explorerUrl: explorerAccountUrl(publicKey),
   };
   return withHorizon429Backoff(async () => {

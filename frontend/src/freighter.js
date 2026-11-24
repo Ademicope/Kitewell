@@ -8,12 +8,15 @@ import {
   signAuthEntry,
 } from "@stellar/freighter-api";
 import * as StellarSdk from "@stellar/stellar-sdk";
+import { Buffer } from "buffer";
 import { findNetworkByPassphrase, getActiveNetwork } from "./network";
 import {
   buildAsset,
   parsePathAssets,
   buildSetOptionsBody,
   MAX_ASSET_CODE_LENGTH,
+  validateDataName,
+  validateDataValue,
 } from "./stellar";
 import { parseHorizonError } from "./horizonErrorParse";
 import { formatTrustlineLimit } from "./trustlineLimitFormat";
@@ -1056,19 +1059,57 @@ export async function changeTrustWithFreighter(
   return signAndSubmit(transaction, publicKey);
 }
 
-async function getPaymentFee(server) {
-  if (typeof server.feeStats !== "function") return StellarSdk.BASE_FEE;
+/**
+ * Set or clear one account data entry.
+ * Passing null clears the name; otherwise value is UTF-8.
+ */
+export async function manageDataWithFreighter(publicKey, name, value = null) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
 
-  try {
-    const stats = await server.feeStats();
-    const charged = stats?.fee_charged;
-    const fee = charged?.p10 ?? charged?.mode ?? charged?.min;
-    const feeNumber = Number(fee);
-    return Number.isSafeInteger(feeNumber) && feeNumber > 0
-      ? feeNumber
-      : StellarSdk.BASE_FEE;
-  } catch {
-    return StellarSdk.BASE_FEE;
+  const normalizedName = validateDataName(name);
+  const normalizedValue =
+    value === null || value === undefined
+      ? null
+      : Buffer.from(validateDataValue(value), "utf8");
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(
+      StellarSdk.Operation.manageData({
+        name: normalizedName,
+        value: normalizedValue,
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  return signAndSubmit(transaction, publicKey);
+}
+
+export async function setAccountDataWithFreighter(publicKey, name, value) {
+  return manageDataWithFreighter(publicKey, name, value);
+}
+
+export async function clearAccountDataWithFreighter(publicKey, name) {
+  return manageDataWithFreighter(publicKey, name, null);
+}
+
+export const manageDataEntryWithFreighter = manageDataWithFreighter;
+
+/**
+ * Update an issuer's home domain and/or auth flags with `setOptions`, signed by
+ * the connected account. Validation (including the immutable confirmation
+ * gate) lives in `buildSetOptionsBody`, so an unsafe combination never reaches
+ * Freighter.
+ */
+export async function setAccountOptionsWithFreighter(publicKey, options = {}) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
   }
 }
 
