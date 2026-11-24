@@ -2857,17 +2857,19 @@ export default function App() {
                       {labEvents.map((event) => (
                         <li key={event.id} className="balance-row">
                           <div>
-                            <strong>{event.type}</strong>
+                            <strong>{event.functionName ?? "unknown"}</strong>
                             <span className="muted balance-row__issuer">
                               ledger {event.ledger}
                             </span>
                           </div>
-                          <div className="muted">
+                          <div className="muted contract-event-detail">
                             {event.type === "register"
-                              ? `${event.name ?? "—"} · ${shortenAddress(event.caller)} · ${
+                              ? `${event.name ?? "—"} · ${event.caller} · ${
                                   event.isNew ? "new builder" : "existing"
                                 }`
-                              : `paused = ${String(event.paused)}`}
+                              : event.type === "paused"
+                                ? `paused = ${String(event.paused)}`
+                                : `topics: ${event.topics.join(" · ")}`}
                           </div>
                         </li>
                       ))}
@@ -2875,7 +2877,7 @@ export default function App() {
                   ) : (
                     !labEventsError && (
                       <p className="muted">
-                        No register or pause events since this tab opened.
+                        No contract events since this tab opened.
                       </p>
                     )
                   )}

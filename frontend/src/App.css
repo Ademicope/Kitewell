@@ -498,6 +498,9 @@ body {
   font-size: 11px;
   margin-top: 2px;
 }
+.contract-event-detail {
+  overflow-wrap: anywhere;
+}
 .balance-row__actions {
   display: flex;
   align-items: center;
