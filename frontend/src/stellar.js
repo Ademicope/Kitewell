@@ -691,6 +691,32 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
   }, options);
 }
 
+/**
+ * Group payment records under the UTC day of their ledger close time.
+ *
+ * Days are ordered newest first; records keep their input order inside a day.
+ * A record without a usable `created_at` goes to a trailing `day: null` group.
+ * Re-run it on the full merged list after each page so new rows land in the
+ * correct existing day.
+ *
+ * @param {object[]} records Payment records carrying a `created_at` ISO time.
+ * @returns {{ day: string|null, records: object[] }[]} `day` is `YYYY-MM-DD`
+ *   (UTC), or null for the Unknown group.
+ */
+export function groupPaymentsByDay(records) {
+  const byDay = new Map();
+  for (const record of records) {
+    const time = Date.parse(record?.created_at);
+    const day = Number.isNaN(time) ? null : new Date(time).toISOString().slice(0, 10);
+    if (!byDay.has(day)) byDay.set(day, []);
+    byDay.get(day).push(record);
+  }
+
+  const dated = [...byDay.keys()].filter((day) => day !== null).sort().reverse();
+  const days = byDay.has(null) ? [...dated, null] : dated;
+  return days.map((day) => ({ day, records: byDay.get(day) }));
+}
+
 /** Read one transaction and all its operations directly from the active Horizon. */
 export async function getTransactionByHash(input, options = {}) {
   const hash = normaliseTxHash(input);

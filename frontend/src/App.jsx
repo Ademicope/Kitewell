@@ -39,6 +39,7 @@ import {
   getClaimableBalances,
   getLiquidityPool,
   getTransactions,
+  groupPaymentsByDay,
   explorerAccountUrl,
   explorerTxUrl,
   isHorizonSlowdownError,
@@ -3403,44 +3404,51 @@ export default function App() {
               </p>
               {visibleTransactions.length > 0 ? (
                 <div className="tx-list">
-                  {visibleTransactions.map((tx) => {
-                    const isOutgoing = tx.from === publicKey;
-                    const createdAt = formatCreatedAt(tx.created_at);
-                    return (
-                      <div
-                        key={tx.id}
-                        className={`tx-item ${isOutgoing ? "tx-item--out" : "tx-item--in"}`}
-                      >
-                        <div className="tx-item__direction">
-                          {isOutgoing ? "Sent" : "Received"}
-                        </div>
-                        <div className="tx-item__amount">
-                          {parseFloat(tx.amount).toLocaleString()} {tx.asset_code || "XLM"}
-                        </div>
-                        <div className="tx-item__addr muted">
-                          {isOutgoing
-                            ? `To ${shortenAddress(tx.to)}`
-                            : `From ${shortenAddress(tx.from)}`}
-                        </div>
-                        <a
-                          href={explorerTxUrl(tx.transaction_hash)}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="tx-item__link"
-                        >
-                          Explorer ↗
-                        </a>
-                        {createdAt && (
-                          <time
-                            className="tx-item__time"
-                            dateTime={tx.created_at}
+                  {groupPaymentsByDay(visibleTransactions).map((group) => (
+                    <section key={group.day ?? "unknown"} className="tx-day">
+                      <h3 className="tx-day__heading">
+                        {group.day ?? "Unknown"} ({group.records.length})
+                      </h3>
+                      {group.records.map((tx) => {
+                        const isOutgoing = tx.from === publicKey;
+                        const createdAt = formatCreatedAt(tx.created_at);
+                        return (
+                          <div
+                            key={tx.id}
+                            className={`tx-item ${isOutgoing ? "tx-item--out" : "tx-item--in"}`}
                           >
-                            {createdAt}
-                          </time>
-                        )}
-                      </div>
-                    );
-                  })}
+                            <div className="tx-item__direction">
+                              {isOutgoing ? "Sent" : "Received"}
+                            </div>
+                            <div className="tx-item__amount">
+                              {parseFloat(tx.amount).toLocaleString()} {tx.asset_code || "XLM"}
+                            </div>
+                            <div className="tx-item__addr muted">
+                              {isOutgoing
+                                ? `To ${shortenAddress(tx.to)}`
+                                : `From ${shortenAddress(tx.from)}`}
+                            </div>
+                            <a
+                              href={explorerTxUrl(tx.transaction_hash)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="tx-item__link"
+                            >
+                              Explorer ↗
+                            </a>
+                            {createdAt && (
+                              <time
+                                className="tx-item__time"
+                                dateTime={tx.created_at}
+                              >
+                                {createdAt}
+                              </time>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </section>
+                  ))}
                 </div>
               ) : (
                 !loading && <p className="muted">No payments yet.</p>
