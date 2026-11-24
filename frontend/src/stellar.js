@@ -566,6 +566,24 @@ function liabilityFields(balance, isNative, subentryCount, baseReserve) {
   };
 }
 
+/**
+ * Hide only idle, zero-balance credit trustlines. Native XLM, pool shares and
+ * trustlines with either buying or selling liabilities always remain visible.
+ */
+export function filterVisibleBalances(balances, hideZeroCreditAssets = false) {
+  if (!Array.isArray(balances)) return [];
+  if (!hideZeroCreditAssets) return balances;
+
+  return balances.filter((balance) => {
+    if (balance?.isNative || balance?.isPoolShare) return true;
+    if (Number(balance?.balance || 0) !== 0) return true;
+    return (
+      Number(balance?.buyingLiabilities || 0) !== 0 ||
+      Number(balance?.sellingLiabilities || 0) !== 0
+    );
+  });
+}
+
 async function readBaseReserve() {
   let baseReserve = 0.5;
   try {

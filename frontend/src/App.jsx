@@ -54,6 +54,7 @@ import {
   downloadAccountSnapshot,
   getAccountAuthConfig,
   getIssuedAssetTrustlines,
+  filterVisibleBalances,
   IMMUTABLE_CONFIRMATION,
   watchOfferUntilGone,
 } from "./stellar";
@@ -117,6 +118,15 @@ const TABS = [
 ];
 const PENDING_REFRESH_MS = 8000;
 const EVENT_POLL_MS = 6000;
+const HIDE_ZERO_ASSETS_STORAGE_KEY = "kitewell.hideZeroCreditAssets";
+
+function readHideZeroAssetsPreference() {
+  try {
+    return globalThis.localStorage?.getItem(HIDE_ZERO_ASSETS_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
 const PATH_MODE_FIELDS = {
   strictSend: {
     amountLabel: "Amount to send",
@@ -165,6 +175,9 @@ export default function App() {
   const [networkId, setNetworkId] = useState(getActiveNetworkId());
   const [freighterInstalled, setFreighterInstalled] = useState(null);
   const [balances, setBalances] = useState([]);
+  const [hideZeroCreditAssets, setHideZeroCreditAssets] = useState(
+    readHideZeroAssetsPreference
+  );
   const [claimableBalances, setClaimableBalances] = useState([]);
   const [liquidityPools, setLiquidityPools] = useState({});
   const [liquidityForm, setLiquidityForm] = useState({
@@ -392,8 +405,9 @@ export default function App() {
 
   const xlmBalance = balances.find((b) => b.isNative)?.balance ?? null;
   const assetBalances = balances.filter((b) => !b.isPoolShare);
-  const sellableAssets = assetBalances.filter(
-    (asset) => Number.parseFloat(asset.available ?? asset.balance) > 0
+  const visibleAssetBalances = filterVisibleBalances(
+    assetBalances,
+    hideZeroCreditAssets
   );
   const poolShares = poolShareRows(balances, liquidityPools);
   const memoField = MEMO_FIELDS[sendForm.memoType];
@@ -3221,9 +3235,29 @@ export default function App() {
                 )}
               </div>
 
-              {assetBalances.length > 0 ? (
+              <label className="label">
+                <input
+                  type="checkbox"
+                  checked={hideZeroCreditAssets}
+                  onChange={(event) => {
+                    const checked = event.target.checked;
+                    setHideZeroCreditAssets(checked);
+                    try {
+                      globalThis.localStorage?.setItem(
+                        HIDE_ZERO_ASSETS_STORAGE_KEY,
+                        String(checked)
+                      );
+                    } catch {
+                      /* The preference remains active for this session. */
+                    }
+                  }}
+                />{" "}
+                Hide zero-balance credit assets (trustlines remain)
+              </label>
+
+              {visibleAssetBalances.length > 0 ? (
                 <ul className="balance-list">
-                  {assetBalances.map((b) => (
+                  {visibleAssetBalances.map((b) => (
                     <li key={b.key} className="balance-row">
                       <div>
                         <strong>{b.code}</strong>
