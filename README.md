@@ -77,7 +77,7 @@ With no `KITEWELL_CONTRACT_ID` configured, the **Lab** tab can also deploy the e
 npm test
 ```
 
-Vitest suite in `frontend/src/stellar.test.js` covers the stellar helpers (explorer URLs, asset/path parsing, Friendbot funding, balance/payment mapping, backend → Horizon fallback) with mocked Horizon SDK and API calls — CI-friendly, no Freighter wallet or network access required. `frontend/src/path-payment.test.js` covers amount normalization and path-payment operation building. `frontend/src/freighter.test.js` covers the Lab-tab Soroban registry reads, `register` invoke, and the Wasm install → `init` deploy order (with both phases stubbed). `frontend/src/txInspector.test.js` covers decoding a payment envelope, a truncated XDR, the wrong-network passphrase error, and fee-bump inner transactions.
+Vitest suite in `frontend/src/stellar.test.js` covers the stellar helpers (explorer URLs, asset/path parsing, Friendbot funding, balance/payment mapping, backend → Horizon fallback) with mocked Horizon SDK and API calls — CI-friendly, no Freighter wallet or network access required. `frontend/src/path-payment.test.js` covers amount normalization and path-payment operation building. `frontend/src/freighter.test.js` covers the Lab-tab Soroban registry reads and `register` invoke. `frontend/src/txInspector.test.js` covers decoding a payment envelope, a truncated XDR, the wrong-network passphrase error, and fee-bump inner transactions. `frontend/src/compose-transaction.test.js` covers ordered multi-operation building, one-signature submission, the empty/over-100 guards, and the Horizon failed-operation index.
 
 ## Screenshots
 
@@ -105,6 +105,8 @@ The Testnet lab UI, using the existing assets in [`screenshots/`](./screenshots)
   minimum-balance calculator and pre-sign reserve check
 - XLM + credit-asset payments (asset picked from balances) + history
 - Path payments (`pathPaymentStrictSend` / `pathPaymentStrictReceive`)
+- Multi-operation composer: combine payment, change-trust, and manage-data operations,
+  reorder or remove rows, then sign once for one hash (up to 100 operations)
 - Read-only XDR inspector: paste a base64 transaction envelope to review its source, fee,
   sequence, memo, time bounds, and operations before signing (fee-bump aware). Nothing is
   submitted.
