@@ -36,8 +36,10 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
               }),
             }),
           }),
-          orderbook: () => ({
-            limit: () => ({ call: orderBookCallMock }),
+          orderbook: (selling, buying) => ({
+            limit: () => ({
+              call: () => orderBookCallMock(selling, buying),
+            }),
           }),
         };
       }),
@@ -82,6 +84,9 @@ function horizonAccountFixture() {
         asset_issuer: "GISSUER",
         balance: "11.0000000",
         limit: "1000.0000000",
+        is_authorized: false,
+        is_authorized_to_maintain_liabilities: true,
+        clawback_enabled: false,
       },
     ],
   };
@@ -183,6 +188,32 @@ describe("getOrderBook", () => {
   });
 });
 
+describe("order book read", () => {
+  const issuer = StellarSdk.Keypair.random().publicKey();
+
+  it("loads the selected selling and buying assets", async () => {
+    const selling = StellarSdk.Asset.native();
+    const buying = new StellarSdk.Asset("USDC", issuer);
+    const fixture = { asks: [{ price: "2", amount: "10" }], bids: [] };
+    orderBookCallMock.mockResolvedValue(fixture);
+
+    await expect(getOrderBook(selling, buying)).resolves.toEqual({
+      asks: [{ ...fixture.asks[0], priceR: undefined }],
+      bids: [],
+    });
+    expect(orderBookCallMock).toHaveBeenCalledWith(selling, buying);
+  });
+
+  it("refuses an invalid pair before calling Horizon", async () => {
+    const native = StellarSdk.Asset.native();
+    await expect(getOrderBook(native, native)).rejects.toThrow(
+      "Selling and buying assets must be different."
+    );
+    await expect(getOrderBook(null, native)).rejects.toThrow(/two different valid assets/);
+    expect(orderBookCallMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("fundWithFriendbot", () => {
   it("returns the friendbot JSON on success", async () => {
     const body = { hash: "abc123", successful: true };
@@ -257,6 +288,9 @@ describe("balance mapping", () => {
           balance: "11.0000000",
           limit: "1000.0000000",
           isNative: false,
+          isAuthorized: false,
+          isAuthorizedToMaintainLiabilities: true,
+          clawbackEnabled: false,
         },
       ],
     });
@@ -270,6 +304,9 @@ describe("balance mapping", () => {
         balance: "11.0000000",
         limit: "1000.0000000",
         isNative: false,
+        isAuthorized: false,
+        isAuthorizedToMaintainLiabilities: true,
+        clawbackEnabled: false,
       },
     ]);
   });
@@ -297,6 +334,9 @@ describe("balance mapping", () => {
         balance: "11.0000000",
         limit: "1000.0000000",
         isNative: false,
+        isAuthorized: false,
+        isAuthorizedToMaintainLiabilities: true,
+        clawbackEnabled: false,
         sellingLiabilities: "0.0000000",
         buyingLiabilities: "0.0000000",
         available: "11.0000000",

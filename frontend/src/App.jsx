@@ -5,9 +5,11 @@ import {
   buildPaymentEnvelope,
   submitEnvelopeWithFreighter,
   pathPaymentWithFreighter,
+  changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
+  simulateRegisterBuilder,
   setAccountOptionsWithFreighter,
   allowTrustWithFreighter,
   readContractInstanceTtl,
@@ -17,18 +19,22 @@ import {
   readKitewellEvents,
   submitFailureResult,
   signChallengeWithFreighter,
-  simulateRegisterBuilder,
 } from "./freighter";
 import {
   createFailedSubmitLog,
   downloadFailedSubmitLog,
 } from "./failedSubmitLog";
-import { shortenAddress } from "./addressFormat";
+import {
+  shortenAddress,
+  buildMuxedAddress,
+  splitMuxedAddress,
+} from "./addressFormat";
 import {
   fundWithFriendbot,
   buildAsset,
   getAccountBalances,
   getAccountDetails,
+  getOpenOffers,
   getPendingTransactions,
   getLiquidityPool,
   getOrderBook,
@@ -42,6 +48,12 @@ import {
   getIssuedAssetTrustlines,
   IMMUTABLE_CONFIRMATION,
 } from "./stellar";
+import {
+  clearStoredOrderBookPair,
+  parseOrderBookPair,
+  readStoredOrderBookPair,
+  saveOrderBookPair,
+} from "./orderBookPair";
 import { poolShareRows } from "./poolShare";
 import { validatePaymentAmount } from "./validatePaymentAmount";
 import { fetchHealth, fetchNetworkInfo } from "./api";
@@ -55,6 +67,7 @@ import {
 } from "./network";
 import { validateAssetCode } from "./validateAssetCode";
 import { decodeTransactionEnvelope } from "./txInspector";
+import TransactionHashLookup from "./TransactionHashLookup";
 import { completeWebAuthChallenge } from "./sep10WebAuth";
 import { loadIssuerCurrencyList } from "./issuerToml";
 import { createPaymentStreamController } from "./paymentStream";
@@ -70,16 +83,19 @@ const TABS = [
   "Wallet",
   "Fund",
   "Assets",
+  "Offers",
   "Issuer",
   "Send",
   "Path",
   "Offer",
+  "Book",
   "History",
   "Pending",
   "Inspect",
   "Decode",
   "Issuer",
   "Web auth",
+  "Muxed",
   "Lab",
 ];
 const PENDING_REFRESH_MS = 8000;
@@ -136,6 +152,12 @@ export default function App() {
   });
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [limitChangeForm, setLimitChangeForm] = useState({});
+  const [openOffers, setOpenOffers] = useState([]);
+  const [offerPrices, setOfferPrices] = useState({});
+  const [offerError, setOfferError] = useState(null);
+  const [offerLoading, setOfferLoading] = useState(false);
+  const [offerRefresh, setOfferRefresh] = useState(0);
+  const [offerResult, setOfferResult] = useState(null);
   const [pathForm, setPathForm] = useState({
     mode: "strictSend",
     destination: "",
@@ -161,6 +183,9 @@ export default function App() {
   });
   const [orderBook, setOrderBook] = useState(null);
   const [orderBookError, setOrderBookError] = useState(null);
+  const [bookPair, setBookPair] = useState(readStoredOrderBookPair);
+  const [bookResult, setBookResult] = useState(null);
+  const bookClearGenerationRef = useRef(0);
   const [unsignedEnvelope, setUnsignedEnvelope] = useState(null);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
@@ -169,6 +194,11 @@ export default function App() {
   const [labStateError, setLabStateError] = useState(null);
   const [registerForm, setRegisterForm] = useState({ name: "" });
   const [lastRegisterTx, setLastRegisterTx] = useState(null);
+  const [muxedBuildForm, setMuxedBuildForm] = useState({ gAddress: "", id: "" });
+  const [muxedBuildResult, setMuxedBuildResult] = useState(null);
+  const [muxedSplitForm, setMuxedSplitForm] = useState({ mAddress: "" });
+  const [muxedSplitResult, setMuxedSplitResult] = useState(null);
+  const [muxedError, setMuxedError] = useState(null);
   const [inspectForm, setInspectForm] = useState({ xdr: "" });
   const [inspectResult, setInspectResult] = useState(null);
   const [inspectError, setInspectError] = useState(null);
@@ -282,7 +312,39 @@ export default function App() {
     setUnsignedEnvelope(null);
   };
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
+  const muxedSendBase = (() => {
+    const value = sendForm.destination.trim();
+    if (!value) return null;
+    try {
+      return splitMuxedAddress(value).gAddress;
+    } catch {
+      return null;
+    }
+  })();
   const configuredContractId = labInfo?.network?.contract?.kitewell;
+  const parsedBookPair = parseOrderBookPair(bookPair);
+  const bookKey = JSON.stringify([networkId, bookPair.selling, bookPair.buying]);
+  const currentBookResult = bookResult?.key === bookKey ? bookResult : null;
+
+  useEffect(() => {
+    if (activeTab !== "Book") return;
+    const pair = parseOrderBookPair(bookPair);
+    if (!pair) return;
+
+    let cancelled = false;
+    const clearGeneration = bookClearGenerationRef.current;
+    getOrderBook(pair.selling, pair.buying)
+      .then((result) => {
+        if (cancelled || clearGeneration !== bookClearGenerationRef.current) return;
+        setBookResult({ key: bookKey, data: result });
+        saveOrderBookPair(bookPair);
+      })
+      .catch((error) => {
+        if (cancelled || clearGeneration !== bookClearGenerationRef.current) return;
+        setBookResult({ key: bookKey, error: error.message || "Could not load the order book." });
+      });
+    return () => { cancelled = true; };
+  }, [activeTab, bookPair, bookKey]);
 
   const getOfferAsset = (side) => {
     const type = offerForm[`${side}Type`];
@@ -298,6 +360,31 @@ export default function App() {
   }, []);
 
   useEffect(() => () => cancelHorizonReads(), []);
+
+  useEffect(() => {
+    if (activeTab !== "Offers" || !publicKey) return;
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => {
+        if (cancelled) return null;
+        setOfferLoading(true);
+        setOfferError(null);
+        return getOpenOffers(publicKey);
+      })
+      .then((offers) => {
+        if (!cancelled && offers) setOpenOffers(offers);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setOpenOffers([]);
+          setOfferError(error.message || "Could not load open offers.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setOfferLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [activeTab, publicKey, networkId, offerRefresh]);
 
   // A pool-share balance only says how many shares the account holds. Load
   // each pool so the panel can also show both reserves and the total shares.
@@ -448,6 +535,9 @@ export default function App() {
       const address = await connectFreighterWallet();
       setPublicKey(address);
       setBalances([]);
+      setOpenOffers([]);
+      setOfferPrices({});
+      setOfferResult(null);
       setTransactions([]);
       setPendingTransactions([]);
       setPendingError(null);
@@ -470,6 +560,9 @@ export default function App() {
     setFailedSubmits([]);
     setPublicKey(null);
     setBalances([]);
+    setOpenOffers([]);
+    setOfferPrices({});
+    setOfferResult(null);
     setTransactions([]);
     setPendingTransactions([]);
     setPendingError(null);
@@ -486,6 +579,9 @@ export default function App() {
       const next = setActiveNetwork(id);
       setNetworkId(id);
       setBalances([]);
+      setOpenOffers([]);
+      setOfferPrices({});
+      setOfferResult(null);
       setTransactions([]);
       setPendingTransactions([]);
       setPendingError(null);
@@ -683,6 +779,13 @@ export default function App() {
       showToast("Choose an asset you hold a trustline for.", "error");
       return null;
     }
+    if (!selected.isNative && selected.isAuthorized === false) {
+      showToast(
+        `${selected.code} is unauthorized by its issuer and cannot be sent.`,
+        "error"
+      );
+      return null;
+    }
     const available = parseFloat(selected.available || selected.balance);
     if (parseFloat(amount) > available) {
       showToast(
@@ -857,6 +960,32 @@ export default function App() {
           ? error.message
           : "The order book could not be read. Try again in a moment."
       );
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleOfferPriceChange = async (event, offer) => {
+    event.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    const newPrice = offerPrices[offer.id]?.trim();
+    setLoading("offer");
+    setOfferResult(null);
+    try {
+      const result = await changeOfferPriceWithFreighter(publicKey, offer, newPrice);
+      setOfferResult({
+        id: offer.id,
+        oldPrice: result.oldPrice,
+        newPrice,
+        hash: result.hash,
+      });
+      setOfferPrices((previous) => ({ ...previous, [offer.id]: "" }));
+      setOfferRefresh((count) => count + 1);
+      showToast(`Offer ${offer.id} price change submitted.`);
+      startTxWatch(result.hash);
+    } catch (error) {
+      trackFailedSubmit("manageSellOffer", error);
+      showToast(error.message || "Could not change offer price.", "error");
     } finally {
       setLoading("");
     }
@@ -1299,6 +1428,36 @@ export default function App() {
     }
   };
 
+  const handleBuildMuxed = (event) => {
+    event.preventDefault();
+    setMuxedError(null);
+    setMuxedBuildResult(null);
+    try {
+      setMuxedBuildResult(
+        buildMuxedAddress(
+          muxedBuildForm.gAddress.trim(),
+          muxedBuildForm.id.trim()
+        )
+      );
+    } catch (err) {
+      setMuxedError(err.message || "Could not build the muxed address.");
+    }
+  };
+
+  const handleSplitMuxed = (event) => {
+    event.preventDefault();
+    setMuxedError(null);
+    setMuxedSplitResult(null);
+    try {
+      const { gAddress, id } = splitMuxedAddress(
+        muxedSplitForm.mAddress.trim()
+      );
+      setMuxedSplitResult({ gAddress, id: id.toString() });
+    } catch (err) {
+      setMuxedError(err.message || "Could not split the muxed address.");
+    }
+  };
+
   const activateTab = (tab) => {
     setActiveTab(tab);
     if (tab === "History") handleHistory();
@@ -1715,6 +1874,73 @@ export default function App() {
             </div>
           )}
 
+          {activeTab === "Offers" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Open offers</h2>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={() => setOfferRefresh((count) => count + 1)}
+                  disabled={offerLoading || loading === "offer" || requireWallet}
+                >
+                  Refresh
+                </button>
+              </div>
+              <p className="muted">
+                Change the price of one offer. Its remaining amount and offer ID stay the same.
+              </p>
+              {requireWallet ? (
+                <p className="muted">Connect Freighter to view your offers.</p>
+              ) : offerLoading ? (
+                <p className="muted" role="status">Loading open offers…</p>
+              ) : offerError ? (
+                <p className="muted" role="alert">{offerError}</p>
+              ) : openOffers.length === 0 ? (
+                <p className="muted">No open offers on this network.</p>
+              ) : (
+                <ul className="balance-list">
+                  {openOffers.map((offer) => (
+                    <li key={offer.id} className="balance-row offer-row">
+                      <strong>
+                        {offer.selling.asset_code || "XLM"} → {offer.buying.asset_code || "XLM"}
+                      </strong>
+                      <span className="muted">Offer #{offer.id} · Remaining {offer.amount} {offer.selling.asset_code || "XLM"}</span>
+                      <form className="form" onSubmit={(event) => handleOfferPriceChange(event, offer)}>
+                        <label className="label" htmlFor={`offer-price-${offer.id}`}>
+                          New price ({offer.buying.asset_code || "XLM"} per {offer.selling.asset_code || "XLM"})
+                        </label>
+                        <input
+                          id={`offer-price-${offer.id}`}
+                          className="input"
+                          type="text"
+                          inputMode="decimal"
+                          required
+                          value={offerPrices[offer.id] || ""}
+                          onChange={(event) => setOfferPrices((previous) => ({ ...previous, [offer.id]: event.target.value }))}
+                        />
+                        <span className="muted">Current price: {offer.price} → New price: {offerPrices[offer.id] || "—"}</span>
+                        <button className="btn btn--primary" type="submit" disabled={loading === "offer" || offerLoading}>
+                          {loading === "offer" ? "Signing…" : "Sign price change"}
+                        </button>
+                      </form>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {offerResult && (
+                <div className="info-box" role="status">
+                  <span className="eyebrow">Offer #{offerResult.id} price change submitted</span>
+                  <p>Old price: {offerResult.oldPrice} → New price: {offerResult.newPrice}</p>
+                  <a className="text-link" href={explorerTxUrl(offerResult.hash)} target="_blank" rel="noreferrer">
+                    View transaction ↗
+                  </a>
+                </div>
+              )}
+              {txWatchPanel}
+            </div>
+          )}
+
           {activeTab === "Assets" && (
             <div className="section">
               <h2>Balances & trustlines</h2>
@@ -1733,6 +1959,13 @@ export default function App() {
                           <span className="muted balance-row__issuer">
                             {shortenAddress(b.issuer)}
                           </span>
+                        )}
+                        {!b.isNative && (
+                          <div className="muted balance-row__flags">
+                            Authorization: {b.isAuthorized === true ? "Authorized" : b.isAuthorized === false ? "Unauthorized" : "Unknown"}
+                            {" · "}Liabilities: {b.isAuthorizedToMaintainLiabilities === true ? "Authorized" : b.isAuthorizedToMaintainLiabilities === false ? "Unauthorized" : "Unknown"}
+                            {" · "}Clawback: {b.clawbackEnabled === true ? "Enabled" : b.clawbackEnabled === false ? "Disabled" : "Unknown"}
+                          </div>
                         )}
                       </div>
                       <div className="balance-row__actions">
@@ -2161,17 +2394,23 @@ export default function App() {
               </p>
               <form onSubmit={handleSend} className="form">
                 <label className="label" htmlFor="send-destination">
-                  Destination
+                  Destination (G… or M…)
                 </label>
                 <input
                   id="send-destination"
                   className="input"
                   type="text"
-                  placeholder="G…"
+                  placeholder="G… or M…"
                   value={sendForm.destination}
                   onChange={(e) => updateSendForm({ destination: e.target.value })}
                   required
                 />
+                {muxedSendBase && (
+                  <p className="muted">
+                    Muxed payment arrives at {shortenAddress(muxedSendBase)} (the
+                    base account).
+                  </p>
+                )}
                 <label className="label" htmlFor="send-asset">
                   Asset
                 </label>
@@ -2185,14 +2424,20 @@ export default function App() {
                   {balances
                     .filter((b) => !b.isNative && !b.isPoolShare)
                     .map((b) => (
-                      <option key={b.key} value={b.key}>
+                      <option key={b.key} value={b.key} disabled={b.isAuthorized === false}>
                         {b.code} ·{" "}
                         {parseFloat(b.balance).toLocaleString(undefined, {
                           maximumFractionDigits: 4,
                         })}
+                        {b.isAuthorized === false ? " · unauthorized (cannot send)" : ""}
                       </option>
                     ))}
                 </select>
+                {selectedSendAsset?.isAuthorized === false && (
+                  <p className="muted" role="alert">
+                    {selectedSendAsset.code} is unauthorized by its issuer, so it cannot be selected as a send asset.
+                  </p>
+                )}
                 <label className="label" htmlFor="send-amount">
                   Amount ({selectedSendAsset?.code ?? "XLM"})
                 </label>
@@ -2542,6 +2787,66 @@ export default function App() {
               </div>}
             </div>
           )}
+          {activeTab === "Book" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Order book</h2>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={() => {
+                    bookClearGenerationRef.current += 1;
+                    clearStoredOrderBookPair();
+                    setBookPair({ selling: "", buying: "" });
+                  }}
+                >
+                  Clear pair
+                </button>
+              </div>
+              <p className="muted">Enter XLM or CODE:ISSUER for each asset.</p>
+              <div className="form">
+                <label className="label" htmlFor="book-selling">Selling asset</label>
+                <input
+                  id="book-selling"
+                  className="input"
+                  type="text"
+                  placeholder="XLM"
+                  value={bookPair.selling}
+                  onChange={(event) => setBookPair((pair) => ({ ...pair, selling: event.target.value }))}
+                />
+                <label className="label" htmlFor="book-buying">Buying asset</label>
+                <input
+                  id="book-buying"
+                  className="input"
+                  type="text"
+                  placeholder="USDC:G…"
+                  value={bookPair.buying}
+                  onChange={(event) => setBookPair((pair) => ({ ...pair, buying: event.target.value }))}
+                />
+              </div>
+              {!parsedBookPair && (
+                <p className="muted">Choose two different valid assets to load the book.</p>
+              )}
+              {parsedBookPair && !currentBookResult && (
+                <p className="muted" role="status">Loading order book…</p>
+              )}
+              {currentBookResult?.error && (
+                <p className="muted" role="alert">{currentBookResult.error}</p>
+              )}
+              {currentBookResult?.data && (
+                <div className="info-box">
+                  <strong>Asks</strong>
+                  {currentBookResult.data.asks?.length ? currentBookResult.data.asks.slice(0, 10).map((offer, index) => (
+                    <span key={index}>Price {offer.price} · Amount {offer.amount}</span>
+                  )) : <span className="muted">No asks</span>}
+                  <strong>Bids</strong>
+                  {currentBookResult.data.bids?.length ? currentBookResult.data.bids.slice(0, 10).map((offer, index) => (
+                    <span key={index}>Price {offer.price} · Amount {offer.amount}</span>
+                  )) : <span className="muted">No bids</span>}
+                </div>
+              )}
+            </div>
+          )}
 
           {activeTab === "Inspect" && (
             <div className="section">
@@ -2583,6 +2888,115 @@ export default function App() {
                   The source, fee, sequence, memo, time bounds, and one block per
                   operation will appear here.
                 </p>
+              )}
+              <TransactionHashLookup key={networkId} />
+            </div>
+          )}
+
+          {activeTab === "Muxed" && (
+            <div className="section">
+              <h2>Muxed accounts</h2>
+              <p className="muted">
+                An M… address combines a G… base account with an unsigned 64-bit
+                id. A payment to the M… address still credits the base account.
+              </p>
+
+              {muxedError && (
+                <div className="info-box info-box--warning" role="alert">
+                  <span className="eyebrow">Muxed address</span>
+                  <p className="muted">{muxedError}</p>
+                </div>
+              )}
+
+              <form className="form" onSubmit={handleBuildMuxed}>
+                <div className="subhead">Build an M address</div>
+                <label className="label" htmlFor="muxed-base-address">
+                  Base account (G…)
+                </label>
+                <input
+                  id="muxed-base-address"
+                  className="input"
+                  type="text"
+                  placeholder="G…"
+                  value={muxedBuildForm.gAddress}
+                  onChange={(e) =>
+                    setMuxedBuildForm({
+                      ...muxedBuildForm,
+                      gAddress: e.target.value,
+                    })
+                  }
+                />
+                <label className="label" htmlFor="muxed-id">
+                  Id (unsigned 64-bit)
+                </label>
+                <input
+                  id="muxed-id"
+                  className="input"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  placeholder="0"
+                  value={muxedBuildForm.id}
+                  onChange={(e) =>
+                    setMuxedBuildForm({
+                      ...muxedBuildForm,
+                      id: e.target.value,
+                    })
+                  }
+                />
+                <button className="btn btn--secondary" type="submit">
+                  Build M address
+                </button>
+              </form>
+
+              {muxedBuildResult && (
+                <div className="info-box">
+                  <span className="eyebrow">Muxed address</span>
+                  <code>{muxedBuildResult}</code>
+                </div>
+              )}
+
+              <form className="form" onSubmit={handleSplitMuxed}>
+                <div className="subhead">Split an M address</div>
+                <label className="label" htmlFor="muxed-address">
+                  Muxed address (M…)
+                </label>
+                <input
+                  id="muxed-address"
+                  className="input"
+                  type="text"
+                  placeholder="M…"
+                  value={muxedSplitForm.mAddress}
+                  onChange={(e) =>
+                    setMuxedSplitForm({ mAddress: e.target.value })
+                  }
+                />
+                <button className="btn btn--secondary" type="submit">
+                  Split M address
+                </button>
+              </form>
+
+              {muxedSplitResult && (
+                <div className="info-box">
+                  <span className="eyebrow">Base account and id</span>
+                  <div className="metadata-grid">
+                    <div>
+                      <span className="metadata-label">Base account</span>
+                      <span className="metadata-value">
+                        {muxedSplitResult.gAddress}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="metadata-label">Id</span>
+                      <span className="metadata-value">
+                        {muxedSplitResult.id}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="muted" style={{ marginTop: 6 }}>
+                    Payments to this M address arrive at the base account above.
+                  </p>
+                </div>
               )}
             </div>
           )}
@@ -2968,17 +3382,19 @@ export default function App() {
                       {labEvents.map((event) => (
                         <li key={event.id} className="balance-row">
                           <div>
-                            <strong>{event.type}</strong>
+                            <strong>{event.functionName ?? "unknown"}</strong>
                             <span className="muted balance-row__issuer">
                               ledger {event.ledger}
                             </span>
                           </div>
-                          <div className="muted">
+                          <div className="muted contract-event-detail">
                             {event.type === "register"
-                              ? `${event.name ?? "—"} · ${shortenAddress(event.caller)} · ${
+                              ? `${event.name ?? "—"} · ${event.caller} · ${
                                   event.isNew ? "new builder" : "existing"
                                 }`
-                              : `paused = ${String(event.paused)}`}
+                              : event.type === "paused"
+                                ? `paused = ${String(event.paused)}`
+                                : `topics: ${event.topics.join(" · ")}`}
                           </div>
                         </li>
                       ))}
@@ -2986,7 +3402,7 @@ export default function App() {
                   ) : (
                     !labEventsError && (
                       <p className="muted">
-                        No register or pause events since this tab opened.
+                        No contract events since this tab opened.
                       </p>
                     )
                   )}
