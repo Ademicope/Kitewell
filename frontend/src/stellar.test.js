@@ -14,9 +14,10 @@ vi.mock("./api", () => ({
   fetchPaymentsViaApi: vi.fn(),
 }));
 
-const { loadAccountMock, paymentsCallMock } = vi.hoisted(() => ({
+const { loadAccountMock, paymentsCallMock, offersCallMock } = vi.hoisted(() => ({
   loadAccountMock: vi.fn(),
   paymentsCallMock: vi.fn(),
+  offersCallMock: vi.fn(),
 }));
 
 vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
@@ -28,6 +29,11 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
       Server: vi.fn(function () {
         return {
           loadAccount: loadAccountMock,
+          offers: () => ({
+            forAccount: () => ({
+              order: () => ({ call: offersCallMock }),
+            }),
+          }),
           payments: () => ({
             forAccount: () => ({
               limit: () => ({
@@ -45,14 +51,20 @@ const { fetchAccountViaApi, fetchPaymentsViaApi } = await import("./api");
 const StellarSdk = await import("@stellar/stellar-sdk");
 const {
   buildAsset,
+  buildManageSellOffer,
   explorerAccountUrl,
   explorerTxUrl,
   fundWithFriendbot,
   getAccountBalances,
   getAccountDetails,
+  getAccountOffers,
   getBalance,
   getTransactions,
   parsePathAssets,
+  withHorizon429Backoff,
+  resetHorizon429BackoffForTests,
+  HORIZON_SLOWDOWN_MESSAGE,
+  computeHorizon429WaitSeconds,
 } = await import("./stellar");
 
 /** Minimal Horizon account payload: 3.5 XLM + an issued asset. */
@@ -82,10 +94,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   loadAccountMock.mockReset();
   paymentsCallMock.mockReset();
+  offersCallMock.mockReset();
+  resetHorizon429BackoffForTests();
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  resetHorizon429BackoffForTests();
 });
 
 describe("explorer urls", () => {
@@ -138,6 +153,107 @@ describe("asset + path helpers", () => {
 
   it("rejects a credit hop without an issuer", () => {
     expect(() => parsePathAssets("USDC")).toThrow(/needs an issuer/);
+  });
+});
+
+describe("manage sell offers", () => {
+  const issuer = StellarSdk.Keypair.random().publicKey();
+
+  it("builds a real sell offer with the collected assets and rational price", () => {
+    const operation = buildManageSellOffer({
+      selling: { isNative: false, code: "USD", issuer },
+      buying: { isNative: true },
+      amount: "2",
+      priceNumerator: "3",
+      priceDenominator: "2",
+    });
+    const payload = operation.body().manageSellOfferOp();
+
+    expect(operation.body().switch().name).toBe("manageSellOffer");
+    expect(payload.selling().switch().name).toBe("assetTypeCreditAlphanum4");
+    expect(payload.buying().switch().name).toBe("assetTypeNative");
+    expect(
+      payload
+        .selling()
+        .alphaNum4()
+        .assetCode()
+        .toString()
+        .replace(/\0/g, "")
+    ).toBe("USD");
+    expect(
+      StellarSdk.StrKey.encodeEd25519PublicKey(
+        payload.selling().alphaNum4().issuer().ed25519()
+      )
+    ).toBe(issuer);
+    expect(payload.amount().toString()).toBe("20000000");
+    expect(payload.price().n()).toBe(3);
+    expect(payload.price().d()).toBe(2);
+    expect(payload.offerId().toString()).toBe("0");
+  });
+
+  it("cancels the specified offer by building a zero-amount operation", () => {
+    const operation = buildManageSellOffer({
+      selling: { isNative: true },
+      buying: { isNative: false, code: "USD", issuer },
+      amount: "0",
+      priceNumerator: "1",
+      priceDenominator: "2",
+      offerId: "123",
+    });
+    const payload = operation.body().manageSellOfferOp();
+
+    expect(payload.amount().toString()).toBe("0");
+    expect(payload.offerId().toString()).toBe("123");
+  });
+
+  it("rejects invalid price fractions and identical assets", () => {
+    expect(() =>
+      buildManageSellOffer({
+        selling: { isNative: true },
+        buying: { isNative: false, code: "USD", issuer },
+        amount: "1",
+        priceNumerator: "0",
+        priceDenominator: "1",
+      })
+    ).toThrow(/Price numerator must be a positive integer/);
+
+    expect(() =>
+      buildManageSellOffer({
+        selling: { isNative: true },
+        buying: { isNative: true },
+        amount: "1",
+        priceNumerator: "1",
+        priceDenominator: "1",
+      })
+    ).toThrow("Selling and buying assets must be different.");
+  });
+});
+
+describe("getAccountOffers", () => {
+  it("maps Horizon offer assets and exact price parts for cancellation", async () => {
+    const issuer = StellarSdk.Keypair.random().publicKey();
+    offersCallMock.mockResolvedValue({
+      records: [
+        {
+          id: "123",
+          selling: `USD:${issuer}`,
+          buying: "native",
+          amount: "5.0000000",
+          price_r: { n: "3", d: "2" },
+        },
+      ],
+    });
+
+    await expect(getAccountOffers("GTEST")).resolves.toEqual([
+      {
+        offerId: "123",
+        selling: { isNative: false, code: "USD", issuer },
+        buying: { isNative: true },
+        amount: "5.0000000",
+        priceNumerator: "3",
+        priceDenominator: "2",
+      },
+    ]);
   });
 });
 
@@ -237,7 +353,17 @@ describe("balance mapping", () => {
     loadAccountMock.mockResolvedValue(horizonAccountFixture());
 
     await expect(getAccountBalances("GTEST")).resolves.toEqual([
-      { key: "native", code: "XLM", issuer: null, balance: "3.5000000", limit: null, isNative: true },
+      {
+        key: "native",
+        code: "XLM",
+        issuer: null,
+        balance: "3.5000000",
+        limit: null,
+        isNative: true,
+        sellingLiabilities: "0.0000000",
+        buyingLiabilities: "0.0000000",
+        available: "1.5000000", // 3.5 - (0.5 * (2 + 2)) = 1.5
+      },
       {
         key: "FOO:GISSUER",
         code: "FOO",
@@ -245,6 +371,9 @@ describe("balance mapping", () => {
         balance: "11.0000000",
         limit: "1000.0000000",
         isNative: false,
+        sellingLiabilities: "0.0000000",
+        buyingLiabilities: "0.0000000",
+        available: "11.0000000",
       },
     ]);
   });
@@ -264,6 +393,135 @@ describe("balance mapping", () => {
       ]),
       explorerUrl: "https://stellar.expert/explorer/testnet/account/GTEST",
     });
+  });
+});
+
+describe("Horizon 429 backoff", () => {
+  function horizon429(retryAfter) {
+    const error = new Error("Too Many Requests");
+    error.response = {
+      status: 429,
+      headers: retryAfter == null ? {} : { "retry-after": String(retryAfter) },
+    };
+    return error;
+  }
+
+  it("stubs two 429s and asserts the second wait is longer", async () => {
+    const waits = [];
+    const sleep = vi.fn(async (ms) => {
+      waits.push(ms);
+    });
+
+    const read = vi
+      .fn()
+      .mockRejectedValueOnce(horizon429())
+      .mockRejectedValueOnce(horizon429());
+
+    await expect(withHorizon429Backoff(read, { sleep })).rejects.toThrow(
+      HORIZON_SLOWDOWN_MESSAGE
+    );
+    await expect(withHorizon429Backoff(read, { sleep })).rejects.toThrow(
+      HORIZON_SLOWDOWN_MESSAGE
+    );
+
+    expect(waits).toEqual([2000, 4000]);
+    expect(waits[1]).toBeGreaterThan(waits[0]);
+    expect(computeHorizon429WaitSeconds(1)).toBe(2);
+    expect(computeHorizon429WaitSeconds(2)).toBe(4);
+    expect(computeHorizon429WaitSeconds(5)).toBe(30);
+  });
+
+  it("prefers Retry-After when Horizon sends it", async () => {
+    const waits = [];
+    const sleep = vi.fn(async (ms) => {
+      waits.push(ms);
+    });
+
+    await expect(
+      withHorizon429Backoff(() => Promise.reject(horizon429(7)), { sleep })
+    ).rejects.toThrow(HORIZON_SLOWDOWN_MESSAGE);
+
+    expect(waits).toEqual([7000]);
+  });
+
+  it("resets the shared backoff clock after a successful read", async () => {
+    const waits = [];
+    const sleep = vi.fn(async (ms) => {
+      waits.push(ms);
+    });
+
+    await expect(
+      withHorizon429Backoff(() => Promise.reject(horizon429()), { sleep })
+    ).rejects.toThrow(HORIZON_SLOWDOWN_MESSAGE);
+
+    await expect(
+      withHorizon429Backoff(async () => "ok", { sleep })
+    ).resolves.toBe("ok");
+
+    await expect(
+      withHorizon429Backoff(() => Promise.reject(horizon429()), { sleep })
+    ).rejects.toThrow(HORIZON_SLOWDOWN_MESSAGE);
+
+    expect(waits).toEqual([2000, 2000]);
+  });
+
+  it("does not apply 429 backoff to a 500", async () => {
+    const sleep = vi.fn(async () => {});
+    const serverError = new Error("Internal Server Error");
+    serverError.response = { status: 500 };
+
+    await expect(
+      withHorizon429Backoff(() => Promise.reject(serverError), { sleep })
+    ).rejects.toThrow("Internal Server Error");
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("cancels the wait when the signal aborts", async () => {
+    const controller = new AbortController();
+    const sleep = vi.fn(
+      (_ms, signal) =>
+        new Promise((_, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              const error = new Error("Aborted");
+              error.name = "AbortError";
+              reject(error);
+            },
+            { once: true }
+          );
+          controller.abort();
+        })
+    );
+
+    await expect(
+      withHorizon429Backoff(() => Promise.reject(horizon429()), {
+        signal: controller.signal,
+        sleep,
+      })
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("lets two Horizon callers share one backoff clock per network", async () => {
+    const waits = [];
+    const sleep = vi.fn(async (ms) => {
+      waits.push(ms);
+    });
+
+    fetchAccountViaApi.mockRejectedValue(new Error("backend down"));
+    fetchPaymentsViaApi.mockRejectedValue(new Error("backend down"));
+    loadAccountMock.mockRejectedValue(horizon429());
+    paymentsCallMock.mockRejectedValue(horizon429());
+
+    await expect(
+      getAccountBalances("GTEST", { sleep })
+    ).rejects.toThrow(HORIZON_SLOWDOWN_MESSAGE);
+    await expect(
+      getTransactions("GTEST", 15, undefined, { sleep })
+    ).rejects.toThrow(HORIZON_SLOWDOWN_MESSAGE);
+
+    expect(waits).toEqual([2000, 4000]);
+    expect(waits[1]).toBeGreaterThan(waits[0]);
   });
 });
 
