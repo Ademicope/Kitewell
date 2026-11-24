@@ -1099,3 +1099,103 @@ export async function fetchAnchorInfo(domainOrIssuer) {
     transferServerInfo,
   };
 }
+
+/**
+ * Fetch a complete account snapshot from Horizon.
+ *
+ * @param {string} publicKey The account to snapshot.
+ * @returns {Promise<object>} A comprehensive account snapshot including id,
+ *   sequence, balances, signers, thresholds, data entries, offers, and
+ *   subentry count. Secrets and signed XDR are never included.
+ */
+export async function getAccountSnapshot(publicKey) {
+  if (!publicKey || typeof publicKey !== "string") {
+    throw new Error("Public key is required.");
+  }
+
+  const account = await getServer().loadAccount(publicKey);
+
+  // Fetch offers for this account
+  let offers = [];
+  try {
+    const offersResponse = await getServer()
+      .offers()
+      .forAccount(publicKey)
+      .limit(200)
+      .call();
+    offers = offersResponse.records.map((offer) => ({
+      id: offer.id,
+      selling: offer.selling,
+      buying: offer.buying,
+      amount: offer.amount,
+      price: offer.price,
+      price_r: offer.price_r,
+    }));
+  } catch {
+    // Offers are optional; if fetch fails, continue with empty array
+    offers = [];
+  }
+
+  // Process data entries, converting non-UTF-8 values to hex
+  const dataEntries = {};
+  if (account.data_attr) {
+    Object.entries(account.data_attr).forEach(([key, value]) => {
+      try {
+        // Try to decode as UTF-8
+        const decoded = Buffer.from(value, "base64").toString("utf8");
+        // Check if it round-trips correctly (is valid UTF-8)
+        if (Buffer.from(decoded, "utf8").toString("base64") === value) {
+          dataEntries[key] = decoded;
+        } else {
+          // Not valid UTF-8, store as hex
+          dataEntries[key] = Buffer.from(value, "base64").toString("hex");
+        }
+      } catch {
+        // If decoding fails, store as hex
+        dataEntries[key] = Buffer.from(value, "base64").toString("hex");
+      }
+    });
+  }
+
+  return {
+    id: account.id,
+    sequence: account.sequenceNumber(),
+    subentryCount: account.subentry_count,
+    thresholds: {
+      low: account.thresholds.low_threshold,
+      medium: account.thresholds.med_threshold,
+      high: account.thresholds.high_threshold,
+    },
+    signers: account.signers.map((signer) => ({
+      key: signer.key,
+      weight: signer.weight,
+      type: signer.type,
+    })),
+    balances: mapHorizonBalances(account),
+    data: dataEntries,
+    offers,
+    network: getActiveNetworkId(),
+    exportedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Download an account snapshot as a JSON file.
+ *
+ * @param {string} publicKey The account to snapshot.
+ */
+export async function downloadAccountSnapshot(publicKey) {
+  const snapshot = await getAccountSnapshot(publicKey);
+
+  const filename = `kitewell-account-${snapshot.id.slice(0, 8)}-${Date.now()}.json`;
+  const json = JSON.stringify(snapshot, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+
+  URL.revokeObjectURL(url);
+}

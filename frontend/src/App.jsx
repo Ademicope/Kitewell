@@ -48,7 +48,10 @@ import {
   getClaimableBalances,
   explorerAccountUrl,
   explorerTxUrl,
-  resolveFederationAddress,
+  downloadAccountSnapshot,
+  getAccountAuthConfig,
+  getIssuedAssetTrustlines,
+  IMMUTABLE_CONFIRMATION,
 } from "./stellar";
 import {
   clearStoredOrderBookPair,
@@ -344,6 +347,19 @@ export default function App() {
   const handleDownloadFailedSubmits = () => {
     if (failedSubmits.length === 0) return;
     downloadFailedSubmitLog(failedSubmitLogRef.current);
+  };
+
+  const handleDownloadAccountSnapshot = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading("snapshot");
+    try {
+      await downloadAccountSnapshot(publicKey);
+      showToast("Account snapshot downloaded.");
+    } catch (e) {
+      showToast(e.message || "Could not download account snapshot.", "error");
+    } finally {
+      setLoading("");
+    }
   };
 
   const xlmBalance = balances.find((b) => b.isNative)?.balance ?? null;
@@ -2656,118 +2672,26 @@ export default function App() {
                       </a>
                     </div>
                   )}
-                  {accountDetails && (
-                    <div className="info-box">
-                      <span className="eyebrow">Manage data</span>
-                      {accountDetails.dataEntries?.length ? (
-                        <ul className="data-list">
-                          {accountDetails.dataEntries.map((entry) => (
-                            <li className="data-row" key={entry.name}>
-                              <div className="data-row__content">
-                                <span className="metadata-label">{entry.name}</span>
-                                <code>{formatDataValue(entry.value)}</code>
-                              </div>
-                              <button
-                                className="btn btn--secondary btn--sm"
-                                type="button"
-                                onClick={() => handleClearData(entry.name)}
-                                disabled={loading === `data-clear-${entry.name}`}
-                              >
-                                Clear
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
+                  <div className="section__row">
+                    <button className="btn btn--secondary" type="button" onClick={handleDisconnect}>
+                      Disconnect
+                    </button>
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      onClick={handleDownloadAccountSnapshot}
+                      disabled={loading === "snapshot"}
+                      title="Download a JSON snapshot of this account"
+                    >
+                      {loading === "snapshot" ? (
+                        <>
+                          <Spinner /> Exporting…
+                        </>
                       ) : (
-                        <p className="muted">No account data entries.</p>
+                        "Download account JSON"
                       )}
-                      <form className="form data-form" onSubmit={handleSetData}>
-                        <label className="label" htmlFor="data-name">Name</label>
-                        <input
-                          id="data-name"
-                          className="input"
-                          value={dataForm.name}
-                          onChange={(e) =>
-                            setDataForm((prev) => ({ ...prev, name: e.target.value }))
-                          }
-                          placeholder="Up to 64 UTF-8 bytes"
-                        />
-                        <label className="label" htmlFor="data-value">Value</label>
-                        <input
-                          id="data-value"
-                          className="input"
-                          value={dataForm.value}
-                          onChange={(e) =>
-                            setDataForm((prev) => ({ ...prev, value: e.target.value }))
-                          }
-                          placeholder="Up to 64 UTF-8 bytes"
-                        />
-                        <button
-                          className="btn btn--primary"
-                          type="submit"
-                          disabled={loading === "data-set"}
-                        >
-                          Set data
-                        </button>
-                      </form>
-                    </div>
-                  )}
-                  <div className="info-box info-box--warning">
-                    <span className="eyebrow">Merge connected account</span>
-                    <p className="muted">
-                      This irreversibly removes the connected account and sends its entire
-                      XLM balance to the destination account. Trustlines, open offers, and
-                      extra signers must be removed first.
-                    </p>
-                    <form className="form data-form" onSubmit={handleMergeAccount}>
-                      <label className="label" htmlFor="merge-destination">
-                        Destination public key
-                      </label>
-                      <input
-                        id="merge-destination"
-                        className="input"
-                        value={mergeForm.destination}
-                        onChange={(e) =>
-                          setMergeForm((prev) => ({
-                            ...prev,
-                            destination: e.target.value,
-                          }))
-                        }
-                        placeholder="G..."
-                      />
-                      <label className="label" htmlFor="merge-retype">
-                        Retype destination public key
-                      </label>
-                      <input
-                        id="merge-retype"
-                        className="input"
-                        value={mergeForm.retypeDestination}
-                        onChange={(e) =>
-                          setMergeForm((prev) => ({
-                            ...prev,
-                            retypeDestination: e.target.value,
-                          }))
-                        }
-                        placeholder="Type the destination again"
-                      />
-                      <button
-                        className="btn btn--primary"
-                        type="submit"
-                        disabled={loading === "merge"}
-                      >
-                        {loading === "merge" ? (
-                          <>
-                            <Spinner /> Checking merge…
-                          </>
-                        ) : (
-                          "Merge account"
-                        )}
-                      </button>
-                    </form>
+                    </button>
                   </div>
-                  <button className="btn btn--secondary" type="button" onClick={handleDisconnect}>
-                    Disconnect
-                  </button>
                 </>
               )}
             </div>
