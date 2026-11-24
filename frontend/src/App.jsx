@@ -59,6 +59,7 @@ import {
 } from "./orderBookPair";
 import { poolShareRows } from "./poolShare";
 import { validatePaymentAmount } from "./validatePaymentAmount";
+import { filterTransactionHistory } from "./txHistoryFilter";
 import { fetchHealth, fetchNetworkInfo } from "./api";
 import { decodeEnvelope, formatArgumentValue } from "./envelopeDecoder";
 import { formatSimulationFee } from "./simulationFees";
@@ -147,6 +148,12 @@ export default function App() {
   const [pendingTransactions, setPendingTransactions] = useState([]);
   const [pendingError, setPendingError] = useState(null);
   const [nextCursor, setNextCursor] = useState(null);
+  const [pageCursors, setPageCursors] = useState([null]);
+  const [historyFilters, setHistoryFilters] = useState({
+    asset: "",
+    direction: "",
+  });
+  const [historyError, setHistoryError] = useState(null);
   const [loading, setLoading] = useState("");
   const [toast, setToast] = useState(null);
   const [sendForm, setSendForm] = useState({
@@ -201,6 +208,7 @@ export default function App() {
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
   const [simulationFees, setSimulationFees] = useState(null);
+  const [simulatedRegisterKey, setSimulatedRegisterKey] = useState(null);
   const [labState, setLabState] = useState(null);
   const [labStateError, setLabStateError] = useState(null);
   const [registerForm, setRegisterForm] = useState({ name: "" });
@@ -571,6 +579,11 @@ export default function App() {
       setOfferResult(null);
       setClaimableBalances([]);
       setTransactions([]);
+      setNextCursor(null);
+      setPageCursors([null]);
+      setHistoryError(null);
+      setSimulationFees(null);
+      setSimulatedRegisterKey(null);
       setPendingTransactions([]);
       setPendingError(null);
       showToast("Freighter connected.");
@@ -596,6 +609,11 @@ export default function App() {
     setOfferPrices({});
     setOfferResult(null);
     setTransactions([]);
+    setNextCursor(null);
+    setPageCursors([null]);
+    setHistoryError(null);
+    setSimulationFees(null);
+    setSimulatedRegisterKey(null);
     setPendingTransactions([]);
     setPendingError(null);
     setAccountDetails(null);
@@ -616,7 +634,12 @@ export default function App() {
       setOfferPrices({});
       setOfferResult(null);
       setTransactions([]);
+      setNextCursor(null);
+      setPageCursors([null]);
+      setHistoryError(null);
       setPendingTransactions([]);
+      setSimulationFees(null);
+      setSimulatedRegisterKey(null);
       setPendingError(null);
       setAccountDetails(null);
       setInspectResult(null);
@@ -1071,16 +1094,20 @@ export default function App() {
 
   const handleHistory = async () => {
     if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setHistoryError(null);
     setLoading("history");
     const signal = beginHorizonRead();
     try {
-      const page = await getTransactions(publicKey, 15, undefined, { signal });
+      const page = await getTransactions(publicKey, 15, null, { signal });
+      if (signal.aborted) return;
       setTransactions(page.records);
       setNextCursor(page.nextCursor);
+      setPageCursors([null]);
       setHorizonNotice(null);
       if (page.records.length === 0) showToast("No payments yet.", "info");
     } catch (error) {
       if (error?.name === "AbortError") return;
+      setHistoryError(error.message || "Could not load payment history.");
       if (isHorizonSlowdownError(error)) {
         setHorizonNotice(HORIZON_SLOWDOWN_MESSAGE);
         showToast(HORIZON_SLOWDOWN_MESSAGE, "info");
@@ -1092,25 +1119,57 @@ export default function App() {
     }
   };
 
-  const handleLoadMore = async () => {
+  const handleLoadNext = async () => {
     if (!publicKey || !nextCursor) return;
-    setLoading("history-more");
+    setHistoryError(null);
+    setLoading("history-next");
     const signal = beginHorizonRead();
     try {
-      // Same page size as the first page; `undefined` keeps the default limit.
       const page = await getTransactions(publicKey, undefined, nextCursor, {
         signal,
       });
-      setTransactions((previous) => [...previous, ...page.records]);
+      if (signal.aborted) return;
+      setTransactions(page.records);
+      setPageCursors((previous) => [...previous, nextCursor]);
       setNextCursor(page.nextCursor);
       setHorizonNotice(null);
     } catch (error) {
       if (error?.name === "AbortError") return;
+      setHistoryError(error.message || "Could not load older payments.");
       if (isHorizonSlowdownError(error)) {
         setHorizonNotice(HORIZON_SLOWDOWN_MESSAGE);
         showToast(HORIZON_SLOWDOWN_MESSAGE, "info");
       } else {
         showToast("Could not load older payments.", "error");
+      }
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleLoadPrevious = async () => {
+    if (!publicKey || pageCursors.length < 2) return;
+    const previousCursor = pageCursors[pageCursors.length - 2];
+    setHistoryError(null);
+    setLoading("history-previous");
+    const signal = beginHorizonRead();
+    try {
+      const page = await getTransactions(publicKey, undefined, previousCursor, {
+        signal,
+      });
+      if (signal.aborted) return;
+      setTransactions(page.records);
+      setPageCursors((previous) => previous.slice(0, -1));
+      setNextCursor(page.nextCursor);
+      setHorizonNotice(null);
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      setHistoryError(error.message || "Could not load newer payments.");
+      if (isHorizonSlowdownError(error)) {
+        setHorizonNotice(HORIZON_SLOWDOWN_MESSAGE);
+        showToast(HORIZON_SLOWDOWN_MESSAGE, "info");
+      } else {
+        showToast("Could not load newer payments.", "error");
       }
     } finally {
       setLoading("");
@@ -1175,6 +1234,30 @@ export default function App() {
 
   const requireWallet = !publicKey;
   const visibleTransactions = mergeStreamedPayments(streamedPayments, transactions);
+  const currentRegisterSimulationKey = JSON.stringify([
+    publicKey,
+    networkId,
+    labInfo?.network?.contract?.kitewell,
+    registerForm.name.trim(),
+  ]);
+  const registerSimulationReady =
+    Boolean(simulationFees) &&
+    !simulationFees.error &&
+    simulatedRegisterKey === currentRegisterSimulationKey;
+  const historyAssets = [
+    ...new Set(
+      visibleTransactions
+        .map((tx) => (tx.asset_type === "native" ? "XLM" : tx.asset_code))
+        .filter(Boolean)
+        .concat(historyFilters.asset ? [historyFilters.asset] : [])
+    ),
+  ].sort();
+  const filteredTransactions = filterTransactionHistory(visibleTransactions, {
+    asset: historyFilters.asset || null,
+    direction: publicKey ? historyFilters.direction || null : null,
+    publicKey,
+  });
+  const currentHistoryCursor = pageCursors[pageCursors.length - 1];
 
   const loadLabInfo = async () => {
     setLoading("lab");
@@ -1231,6 +1314,18 @@ export default function App() {
     if (!registerForm.name.trim()) {
       return showToast("Enter a builder name to register.", "error");
     }
+    const expectedSimulationKey = JSON.stringify([
+      publicKey,
+      networkId,
+      contractId,
+      registerForm.name.trim(),
+    ]);
+    if (
+      simulationFees?.error ||
+      simulatedRegisterKey !== expectedSimulationKey
+    ) {
+      return showToast("Simulate this registration successfully before signing.", "error");
+    }
     setLoading("register");
     try {
       const result = await registerBuilderWithFreighter(
@@ -1240,6 +1335,8 @@ export default function App() {
       );
       setLastRegisterTx(result);
       setRegisterForm({ name: "" });
+      setSimulationFees(null);
+      setSimulatedRegisterKey(null);
       showToast(
         result.confirmed
           ? `Registered on-chain · ${result.hash.slice(0, 12)}…`
@@ -1556,12 +1653,9 @@ export default function App() {
         "error"
       );
     }
-    if (!registerForm.name.trim()) {
-      return showToast("Enter a builder name to register.", "error");
-    }
-
     setLoading("simulate");
     setSimulationFees(null);
+    setSimulatedRegisterKey(null);
     try {
       const fees = await simulateRegisterBuilder(
         publicKey,
@@ -1571,9 +1665,26 @@ export default function App() {
       setSimulationFees(fees);
       if (fees.error) {
         showToast(`Simulation failed: ${fees.error}`, "error");
+      } else {
+        setSimulatedRegisterKey(
+          JSON.stringify([
+            publicKey,
+            networkId,
+            contractId,
+            registerForm.name.trim(),
+          ])
+        );
       }
     } catch (err) {
-      showToast(err.message || "Simulation failed.", "error");
+      const error = err.message || "Simulation failed.";
+      setSimulationFees({
+        error,
+        inclusionFee: null,
+        resourceFee: null,
+        totalFee: null,
+        returnValue: null,
+      });
+      showToast(error, "error");
     } finally {
       setLoading("");
     }
@@ -3328,14 +3439,21 @@ export default function App() {
                       maxLength={64}
                       placeholder="e.g. stellar-alice"
                       value={registerForm.name}
-                      onChange={(e) =>
-                        setRegisterForm({ ...registerForm, name: e.target.value })
-                      }
+                      onChange={(e) => {
+                        setRegisterForm({ ...registerForm, name: e.target.value });
+                        setSimulationFees(null);
+                        setSimulatedRegisterKey(null);
+                      }}
                     />
                     <button
                       className="btn btn--primary"
                       type="submit"
-                      disabled={loading === "register" || requireWallet}
+                      disabled={
+                        loading === "register" ||
+                        loading === "simulate" ||
+                        requireWallet ||
+                        !registerSimulationReady
+                      }
                     >
                       {loading === "register" ? (
                         <>
@@ -3349,14 +3467,18 @@ export default function App() {
                       className="btn btn--secondary"
                       type="button"
                       onClick={handleSimulateRegister}
-                      disabled={loading === "simulate" || requireWallet}
+                      disabled={
+                        loading === "simulate" ||
+                        loading === "register" ||
+                        requireWallet
+                      }
                     >
                       {loading === "simulate" ? (
                         <>
                           <Spinner /> Simulating…
                         </>
                       ) : (
-                        "Simulate fees"
+                        "Simulate register"
                       )}
                     </button>
                     {!publicKey && <p className="muted">Connect Freighter to sign.</p>}
@@ -3366,34 +3488,42 @@ export default function App() {
                       <span className="eyebrow">Simulated fees (stroops)</span>
                       {simulationFees.error ? (
                         <p className="muted">
-                          Simulation failed: fees are unavailable.
+                          Simulation failed: {simulationFees.error}
                         </p>
                       ) : (
-                        <div className="metadata-grid">
-                          <div>
-                            <span className="metadata-label">Inclusion fee</span>
-                            <span className="metadata-value">
-                              {formatSimulationFee(simulationFees.inclusionFee)}
-                            </span>
+                        <>
+                          <div className="metadata-grid">
+                            <div>
+                              <span className="metadata-label">Return value</span>
+                              <span className="metadata-value">
+                                {formatArgumentValue(simulationFees.returnValue)}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="metadata-label">Inclusion fee</span>
+                              <span className="metadata-value">
+                                {formatSimulationFee(simulationFees.inclusionFee)}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="metadata-label">Resource fee</span>
+                              <span className="metadata-value">
+                                {formatSimulationFee(simulationFees.resourceFee)}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="metadata-label">Total fee</span>
+                              <span className="metadata-value">
+                                {formatSimulationFee(simulationFees.totalFee)}
+                              </span>
+                            </div>
                           </div>
-                          <div>
-                            <span className="metadata-label">Resource fee</span>
-                            <span className="metadata-value">
-                              {formatSimulationFee(simulationFees.resourceFee)}
-                            </span>
-                          </div>
-                          <div>
-                            <span className="metadata-label">Total fee</span>
-                            <span className="metadata-value">
-                              {formatSimulationFee(simulationFees.totalFee)}
-                            </span>
-                          </div>
-                        </div>
+                          <p className="muted">
+                            Simulation does not submit. Press Sign &amp; register to sign
+                            and submit this invocation.
+                          </p>
+                        </>
                       )}
-                      <p className="muted">
-                        Simulation does not submit. Press Sign &amp; register to sign
-                        with these fees.
-                      </p>
                     </div>
                   )}
                   {lastRegisterTx && (
@@ -3727,7 +3857,7 @@ export default function App() {
                   className="btn btn--secondary"
                   type="button"
                   onClick={handleHistory}
-                  disabled={loading === "history" || requireWallet}
+                  disabled={loading.startsWith("history") || requireWallet}
                 >
                   {loading === "history" ? (
                     <>
@@ -3741,9 +3871,58 @@ export default function App() {
               <p className="muted" aria-live="polite">
                 {streamStatusLabel(streamState)}
               </p>
-              {visibleTransactions.length > 0 ? (
+              {historyError && (
+                <div className="info-box info-box--warning" role="alert">
+                  <p className="muted">{historyError}</p>
+                </div>
+              )}
+              <div className="section__row">
+                <label className="label">
+                  Asset
+                  <select
+                    className="input"
+                    aria-label="Filter payment history by asset"
+                    value={historyFilters.asset}
+                    onChange={(event) =>
+                      setHistoryFilters((previous) => ({
+                        ...previous,
+                        asset: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">All assets</option>
+                    {historyAssets.map((asset) => (
+                      <option key={asset} value={asset}>
+                        {asset}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="label">
+                  Direction
+                  <select
+                    className="input"
+                    aria-label="Filter payment history by direction"
+                    value={historyFilters.direction}
+                    onChange={(event) =>
+                      setHistoryFilters((previous) => ({
+                        ...previous,
+                        direction: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">Sent and received</option>
+                    <option value="sent">Sent</option>
+                    <option value="received">Received</option>
+                  </select>
+                </label>
+              </div>
+              <p className="muted">
+                Current cursor: <code>{currentHistoryCursor || "first page"}</code>
+              </p>
+              {filteredTransactions.length > 0 ? (
                 <div className="tx-list">
-                  {visibleTransactions.map((tx) => {
+                  {filteredTransactions.map((tx) => {
                     const isOutgoing = tx.from === publicKey;
                     const createdAt = formatCreatedAt(tx.created_at);
                     return (
@@ -3783,26 +3962,44 @@ export default function App() {
                   })}
                 </div>
               ) : (
-                !loading && <p className="muted">No payments yet.</p>
+                !loading && (
+                  <p className="muted">
+                    {visibleTransactions.length > 0
+                      ? "No payments match these filters."
+                      : "No payments yet."}
+                  </p>
+                )
               )}
-              {nextCursor && (
-                <div className="section__row">
-                  <button
-                    className="btn btn--secondary"
-                    type="button"
-                    onClick={handleLoadMore}
-                    disabled={loading === "history-more"}
-                  >
-                    {loading === "history-more" ? (
-                      <>
-                        <Spinner /> Loading…
-                      </>
-                    ) : (
-                      "Load more"
-                    )}
-                  </button>
-                </div>
-              )}
+              <div className="section__row">
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={handleLoadPrevious}
+                  disabled={pageCursors.length < 2 || loading.startsWith("history")}
+                >
+                  {loading === "history-previous" ? (
+                    <>
+                      <Spinner /> Loading…
+                    </>
+                  ) : (
+                    "Previous page"
+                  )}
+                </button>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={handleLoadNext}
+                  disabled={!nextCursor || loading.startsWith("history")}
+                >
+                  {loading === "history-next" ? (
+                    <>
+                      <Spinner /> Loading…
+                    </>
+                  ) : (
+                    "Next page"
+                  )}
+                </button>
+              </div>
 
               {txWatchPanel}
             </div>

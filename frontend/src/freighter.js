@@ -113,20 +113,18 @@ export async function readKitewellState(contractId, viewerAddress) {
 
 /**
  * Simulate the builder registration without signing or submitting it, so the
- * panel can show the inclusion fee and the resource fee separately.
+ * panel can show the return value and fee breakdown before the user signs.
  *
  * @returns {Promise<{
  *   error: string|null,
  *   inclusionFee: string|null,
  *   resourceFee: string|null,
  *   totalFee: string|null,
+ *   returnValue: unknown,
  * }>} Fees in stroops.
  */
 export async function simulateRegisterBuilder(publicKey, contractId, name) {
   const trimmed = (name || "").trim();
-  if (!trimmed) {
-    throw new Error("Enter a builder name to register.");
-  }
   if ([...trimmed].length > 64) {
     throw new Error("Builder name must be 64 characters or fewer.");
   }
@@ -153,7 +151,19 @@ export async function simulateRegisterBuilder(publicKey, contractId, name) {
 
   // Simulation only: the user still has to press Sign to submit.
   const simulation = await sorobanRpc.simulateTransaction(transaction);
-  return parseSimulationFees(simulation, transaction.fee);
+  const fees = parseSimulationFees(simulation, transaction.fee);
+  const hasReturnValue =
+    simulation?.result &&
+    Object.prototype.hasOwnProperty.call(simulation.result, "retval");
+  return {
+    ...fees,
+    error:
+      fees.error || (hasReturnValue ? null : "Simulation returned no result."),
+    returnValue:
+      fees.error || !hasReturnValue
+        ? null
+        : StellarSdk.scValToNative(simulation.result.retval),
+  };
 }
 
 /**
