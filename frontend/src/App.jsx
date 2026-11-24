@@ -20,17 +20,14 @@ import {
   extendCodeTTL,
   readKitewellEvents,
   submitFailureResult,
-  signChallengeWithFreighter,
+  deployKitewellContract,
 } from "./freighter";
 import {
   createFailedSubmitLog,
   downloadFailedSubmitLog,
 } from "./failedSubmitLog";
-import {
-  shortenAddress,
-  buildMuxedAddress,
-  splitMuxedAddress,
-} from "./addressFormat";
+import { copyToClipboardResult } from "./copyToClipboardResult";
+import { shortenAddress } from "./addressFormat";
 import {
   fundWithFriendbot,
   buildAsset,
@@ -213,9 +210,11 @@ export default function App() {
   const [inspectForm, setInspectForm] = useState({ xdr: "" });
   const [inspectResult, setInspectResult] = useState(null);
   const [inspectError, setInspectError] = useState(null);
-  const [envelopeXdr, setEnvelopeXdr] = useState("");
-  const [decodedEnvelope, setDecodedEnvelope] = useState(null);
-  const [decodeError, setDecodeError] = useState(null);
+  const [sessionContractId, setSessionContractId] = useState(null);
+  const [deployedContracts, setDeployedContracts] = useState([]);
+  const [wasmFile, setWasmFile] = useState(null);
+  const [confirmRedeploy, setConfirmRedeploy] = useState(false);
+  const [deployError, setDeployError] = useState(null);
   const tabRefs = useRef([]);
   const horizonAbortRef = useRef(null);
   const [accountDetails, setAccountDetails] = useState(null);
@@ -1335,16 +1334,47 @@ export default function App() {
   };
 
   const requireWallet = !publicKey;
-  const visibleTransactions = mergeStreamedPayments(streamedPayments, transactions);
+  const configuredContractId = labInfo?.network?.contract?.kitewell || null;
+  // A deploy in this session overrides the backend id for reads and registers.
+  const activeContractId = sessionContractId || configuredContractId;
+
+  const readLabState = useCallback(
+    async (contractId) => {
+      if (!contractId) {
+        setLabState(null);
+        setLabStateError(null);
+        return;
+      }
+      setLoading("labstate");
+      setLabStateError(null);
+      try {
+        const state = await readKitewellState(contractId, publicKey);
+        setLabState(state);
+      } catch (e) {
+        setLabState(null);
+        setLabStateError(
+          e.message || "Could not read the kitewell contract via Soroban RPC."
+        );
+      } finally {
+        setLoading("");
+      }
+    },
+    [publicKey]
+  );
+
+  const refreshLabState = useCallback(
+    () => readLabState(activeContractId),
+    [readLabState, activeContractId]
+  );
 
   const loadLabInfo = async () => {
     setLoading("lab");
     setLabError(null);
     try {
       const [health, network] = await Promise.all([fetchHealth(), fetchNetworkInfo()]);
-      const info = { health, network };
-      setLabInfo(info);
-      return info;
+      setLabInfo({ health, network });
+      // Use the freshly fetched id rather than stale state from this render.
+      await readLabState(sessionContractId || network.contract?.kitewell);
     } catch (e) {
       setLabInfo(null);
       setLabError(
@@ -1357,32 +1387,10 @@ export default function App() {
     }
   };
 
-  const refreshLabState = useCallback(async (explicitContractId) => {
-    const contractId = explicitContractId ?? labInfo?.network?.contract?.kitewell;
-    if (!contractId) {
-      setLabState(null);
-      setLabStateError(null);
-      return;
-    }
-    setLoading("labstate");
-    setLabStateError(null);
-    try {
-      const state = await readKitewellState(contractId, publicKey);
-      setLabState(state);
-    } catch (e) {
-      setLabState(null);
-      setLabStateError(
-        e.message || "Could not read the kitewell contract via Soroban RPC."
-      );
-    } finally {
-      setLoading("");
-    }
-  }, [labInfo, publicKey]);
-
   const handleRegister = async (e) => {
     e.preventDefault();
     if (!publicKey) return showToast("Connect Freighter first.", "error");
-    const contractId = labInfo?.network?.contract?.kitewell;
+    const contractId = activeContractId;
     if (!contractId) {
       return showToast(
         "No contract id configured — deploy first (contracts/README.md).",
@@ -1658,59 +1666,59 @@ export default function App() {
     }
   };
 
-  const handleDecodeEnvelope = (event) => {
-    event.preventDefault();
-    setDecodeError(null);
-    setDecodedEnvelope(null);
-    try {
-      setDecodedEnvelope(decodeEnvelope(envelopeXdr, activeNetwork.passphrase));
-    } catch (error) {
-      setDecodedEnvelope(null);
-      setDecodeError(error.message || "Could not decode the envelope.");
-    }
+  const copyContractId = async (contractId) => {
+    const result = await copyToClipboardResult(contractId);
+    showToast(
+      result.ok ? "Contract id copied." : "Could not copy — select the id manually.",
+      result.ok ? "success" : "error"
+    );
   };
 
-  const handleBuildMuxed = (event) => {
-    event.preventDefault();
-    setMuxedError(null);
-    setMuxedBuildResult(null);
-    try {
-      setMuxedBuildResult(
-        buildMuxedAddress(
-          muxedBuildForm.gAddress.trim(),
-          muxedBuildForm.id.trim()
-        )
-      );
-    } catch (err) {
-      setMuxedError(err.message || "Could not build the muxed address.");
+  const handleDeploy = async () => {
+    if (activeNetwork.id !== "TESTNET") {
+      return showToast("Contract deploy is Testnet-only.", "error");
     }
-  };
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!wasmFile) return showToast("Choose the built kitewell.wasm first.", "error");
 
-  const handleSplitMuxed = (event) => {
-    event.preventDefault();
-    setMuxedError(null);
-    setMuxedSplitResult(null);
+    // A second deploy needs an explicit confirmation; the first id stays listed.
+    if (sessionContractId && !confirmRedeploy) {
+      setConfirmRedeploy(true);
+      return;
+    }
+
+    setDeployError(null);
+    setLoading("deploy");
     try {
-      const { gAddress, id } = splitMuxedAddress(
-        muxedSplitForm.mAddress.trim()
+      const wasmBytes = await wasmFile.arrayBuffer();
+      const result = await deployKitewellContract(publicKey, wasmBytes);
+      setSessionContractId(result.contractId);
+      setDeployedContracts((previous) => [...previous, result]);
+      setConfirmRedeploy(false);
+      await readLabState(result.contractId);
+      const copied = await copyToClipboardResult(result.contractId);
+      showToast(
+        copied.ok
+          ? `Deployed · ${result.contractId.slice(0, 8)}… copied.`
+          : `Deployed · ${result.contractId.slice(0, 8)}…`,
+        "success"
       );
-      setMuxedSplitResult({ gAddress, id: id.toString() });
     } catch (err) {
-      setMuxedError(err.message || "Could not split the muxed address.");
+      setDeployError({
+        message: err.message || "Contract deploy failed.",
+        // An init failure still has an installed contract; a failed install does not.
+        contractId: err.contractId || null,
+      });
+      showToast("Contract deploy failed.", "error");
+    } finally {
+      setLoading("");
     }
   };
 
   const activateTab = (tab) => {
     setActiveTab(tab);
     if (tab === "History") handleHistory();
-    if (tab === "Lab") {
-      loadLabInfo().then((info) => {
-        const contractId = info?.network?.contract?.kitewell;
-        refreshLabState(contractId);
-        refreshTtlInfo(contractId);
-      });
-    }
-    if (tab === "Issuer") refreshIssuerPanel();
+    if (tab === "Lab") loadLabInfo();
     if ((tab === "Wallet" || tab === "Assets" || tab === "Send") && publicKey) {
       refreshBalances();
     }
@@ -3433,13 +3441,156 @@ export default function App() {
                   <div className="info-box">
                     <span className="eyebrow">Soroban · kitewell</span>
                     <code>
-                      {labInfo.network.contract?.kitewell ||
-                        "Not deployed yet — see contracts/README.md"}
+                      {activeContractId ||
+                        "Not deployed yet — deploy below or see contracts/README.md"}
                     </code>
                     <p className="muted" style={{ marginTop: 6 }}>
-                      Status: {labInfo.network.contract?.status}
+                      Status:{" "}
+                      {sessionContractId
+                        ? "deployed this session"
+                        : labInfo.network.contract?.status}
                     </p>
                   </div>
+                  {!configuredContractId && (
+                    <div className="info-box">
+                      <span className="eyebrow">Deploy from Wasm</span>
+                      <p className="muted">
+                        No contract id is configured on the backend. Install the registry
+                        Wasm, then run <code>init</code> with your connected account as
+                        admin.
+                      </p>
+                      <label className="label" htmlFor="kitewell-wasm">
+                        kitewell.wasm
+                      </label>
+                      <input
+                        id="kitewell-wasm"
+                        className="input"
+                        type="file"
+                        accept=".wasm,application/wasm"
+                        onChange={(e) => {
+                          setWasmFile(e.target.files?.[0] ?? null);
+                          setConfirmRedeploy(false);
+                          setDeployError(null);
+                        }}
+                      />
+                      <p className="muted">
+                        Build with <code>npm run build:contracts</code> (output:{" "}
+                        <code>contracts/target/wasm32v1-none/release/kitewell.wasm</code>).
+                      </p>
+                      {!confirmRedeploy && (
+                        <button
+                          className="btn btn--secondary"
+                          type="button"
+                          onClick={handleDeploy}
+                          disabled={
+                            loading === "deploy" || requireWallet || !wasmFile
+                          }
+                        >
+                          {loading === "deploy" ? (
+                            <>
+                              <Spinner /> Installing &amp; initialising…
+                            </>
+                          ) : sessionContractId ? (
+                            "Deploy another…"
+                          ) : (
+                            "Install & init"
+                          )}
+                        </button>
+                      )}
+                      {!publicKey && (
+                        <p className="muted">
+                          Connect Freighter to sign the install and init transactions.
+                        </p>
+                      )}
+                      {sessionContractId && !confirmRedeploy && (
+                        <p className="muted">
+                          First id stays visible below; deploying again creates a new one
+                          and asks for confirmation first.
+                        </p>
+                      )}
+                      {confirmRedeploy && (
+                        <div className="info-box info-box--warning" style={{ marginTop: 8 }}>
+                          <span className="eyebrow">Confirm re-deploy</span>
+                          <p className="muted">
+                            A contract was already deployed this session:{" "}
+                            <code>{sessionContractId}</code>. A new deploy creates another
+                            id; the first stays listed below.
+                          </p>
+                          <div className="section__row">
+                            <button
+                              className="btn btn--secondary"
+                              type="button"
+                              onClick={() => setConfirmRedeploy(false)}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              className="btn btn--primary"
+                              type="button"
+                              onClick={handleDeploy}
+                              disabled={loading === "deploy" || !wasmFile}
+                            >
+                              {loading === "deploy" ? (
+                                <>
+                                  <Spinner /> Deploying…
+                                </>
+                              ) : (
+                                "Confirm deploy"
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {deployError && (
+                    <div className="info-box info-box--warning">
+                      <span className="eyebrow">Deploy failed</span>
+                      <p className="muted">{deployError.message}</p>
+                      {deployError.contractId && (
+                        <p className="muted">
+                          Install succeeded with id <code>{deployError.contractId}</code>,
+                          but <code>init</code> did not complete.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {sessionContractId && (
+                    <div className="info-box">
+                      <span className="eyebrow">Deployed this session</span>
+                      <code>{sessionContractId}</code>
+                      <div className="section__row">
+                        <button
+                          className="btn btn--secondary btn--sm"
+                          type="button"
+                          onClick={() => copyContractId(sessionContractId)}
+                        >
+                          Copy id
+                        </button>
+                        <span className="muted">Active for Lab reads &amp; register</span>
+                      </div>
+                      <p className="muted">
+                        Set{" "}
+                        <code>KITEWELL_CONTRACT_ID={sessionContractId}</code> on the
+                        backend to persist it. This panel does not write backend env vars.
+                      </p>
+                      {deployedContracts.length > 1 && (
+                        <div className="metadata-grid">
+                          {deployedContracts.map((entry, index) => (
+                            <div key={`${entry.contractId}-${index}`}>
+                              <span className="metadata-label">
+                                Deploy #{index + 1}
+                                {entry.contractId === sessionContractId
+                                  ? " · active"
+                                  : ""}
+                              </span>
+                              <code>{entry.contractId}</code>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="section__row">
                     <div className="subhead">On-chain registry</div>
                     <button
