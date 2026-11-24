@@ -109,6 +109,7 @@ The Testnet lab UI, using the existing assets in [`screenshots/`](./screenshots)
   sequence, memo, time bounds, and operations before signing (fee-bump aware). Nothing is
   submitted.
 - Backend-backed account/payment reads (Horizon fallback)
+- Latest-ledger header with sequence, UTC close time, base fee, and base reserve
 - Lab panel for API + contract status
 - Lab tab Soroban registry: Freighter-signed `register(caller, name)` check-in + `lab_name` / `builder_count` / `get_builder` reads
 - Lab tab deploy: install the built `kitewell.wasm`, run `init(connected account)`, and use the new id for the session
@@ -168,4 +169,6 @@ one place.
 - Friendbot is Testnet-only and is disabled on Futurenet.
 - The Kitewell backend is configured for Testnet, so account/payment reads go straight to Horizon
   when another network is selected.
+- Latest-ledger values come from the selected network's Horizon endpoint, refresh while the page
+  is visible, and retain the last successful values with a warning when a refresh fails.
 - No Mainnet funds are ever used.

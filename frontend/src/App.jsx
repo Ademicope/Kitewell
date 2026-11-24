@@ -75,16 +75,7 @@ import {
 import { validateAssetCode } from "./validateAssetCode";
 import { checkThresholds } from "./thresholdCheck";
 import { decodeTransactionEnvelope } from "./txInspector";
-import TransactionHashLookup from "./TransactionHashLookup";
-import { completeWebAuthChallenge } from "./sep10WebAuth";
-import { loadIssuerCurrencyList } from "./issuerToml";
-import { createPaymentStreamController } from "./paymentStream";
-import {
-  normaliseTxHash,
-  txStatusPresentation,
-  watchTransactionStatus,
-} from "./txStatusWatch";
-import { buildTransactionExplorerUrl } from "./explorerLink";
+import LatestLedgerHeader from "./LatestLedgerHeader";
 import "./App.css";
 
 const TABS = [
@@ -1936,6 +1927,7 @@ export default function App() {
             ))}
           </select>
         </label>
+        <LatestLedgerHeader networkId={networkId} />
       </header>
 
       <main className="main">

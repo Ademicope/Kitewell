@@ -65,6 +65,7 @@ const {
   explorerAccountUrl,
   explorerTxUrl,
   fundWithFriendbot,
+  getLatestLedger,
   getAccountBalances,
   getAccountDetails,
   getBalance,
@@ -109,9 +110,6 @@ beforeEach(() => {
   loadAccountMock.mockReset();
   paymentsCallMock.mockReset();
   ledgerCallMock.mockReset();
-  ledgerCallMock.mockResolvedValue({
-    records: [{ base_reserve_in_stroops: "5000000" }],
-  });
 });
 
 afterEach(() => {
@@ -126,6 +124,63 @@ describe("explorer urls", () => {
     );
     expect(explorerTxUrl("hash123")).toBe(
       "https://stellar.expert/explorer/testnet/tx/hash123"
+    );
+  });
+});
+
+describe("getLatestLedger", () => {
+  it("maps sequence, UTC close time, base fee, and base reserve", async () => {
+    ledgerCallMock.mockResolvedValue({
+      records: [
+        {
+          sequence: 123456,
+          closed_at: "2026-11-20T15:00:00Z",
+          base_fee_in_stroops: 100,
+          base_reserve_in_stroops: 5000000,
+        },
+      ],
+    });
+
+    await expect(getLatestLedger()).resolves.toEqual({
+      sequence: 123456,
+      closedAt: "2026-11-20T15:00:00.000Z",
+      baseFeeInStroops: "100",
+      baseReserveInStroops: "5000000",
+    });
+  });
+
+  it("uses the explicitly selected network", async () => {
+    ledgerCallMock.mockResolvedValue({
+      records: [
+        {
+          sequence: 2,
+          closed_at: "2026-11-20T15:00:00Z",
+          base_fee_in_stroops: 100,
+          base_reserve_in_stroops: 5000000,
+        },
+      ],
+    });
+
+    await getLatestLedger("FUTURENET");
+
+    expect(StellarSdk.Horizon.Server).toHaveBeenCalledWith(
+      "https://horizon-futurenet.stellar.org"
+    );
+  });
+
+  it("rejects a ledger missing its base reserve instead of treating it as zero", async () => {
+    ledgerCallMock.mockResolvedValue({
+      records: [
+        {
+          sequence: 1,
+          closed_at: "2026-11-20T15:00:00Z",
+          base_fee_in_stroops: 100,
+        },
+      ],
+    });
+
+    await expect(getLatestLedger()).rejects.toThrow(
+      "Latest ledger has an invalid base reserve."
     );
   });
 });

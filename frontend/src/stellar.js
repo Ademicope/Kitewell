@@ -5,6 +5,7 @@ import {
   getActiveNetwork,
   getActiveNetworkId,
   isFriendbotAvailable,
+  NETWORKS,
 } from "./network";
 import { calculateMinimumBalance } from "./accountReserve";
 
@@ -26,135 +27,45 @@ function getServer() {
   return new StellarSdk.Horizon.Server(getActiveNetwork().horizonUrl);
 }
 
-/** @param {unknown} error */
-export function isHorizon429(error) {
-  const status = error?.response?.status ?? error?.status;
-  if (status === 429) return true;
-  const message = String(error?.message ?? "");
-  return /too many requests/i.test(message);
-}
-
-/** @param {unknown} error */
-export function isHorizonSlowdownError(error) {
-  return error instanceof Error && error.message === HORIZON_SLOWDOWN_MESSAGE;
-}
-
-/** @param {unknown} error */
-function readRetryAfterSeconds(error) {
-  const headers = error?.response?.headers;
-  if (!headers) return null;
-
-  const raw =
-    typeof headers.get === "function"
-      ? headers.get("retry-after") ?? headers.get("Retry-After")
-      : headers["retry-after"] ?? headers["Retry-After"];
-
-  if (raw == null || raw === "") return null;
-
-  const asNumber = Number(raw);
-  if (Number.isFinite(asNumber) && asNumber >= 0) return asNumber;
-
-  const asDate = Date.parse(String(raw));
-  if (!Number.isNaN(asDate)) {
-    return Math.max(0, (asDate - Date.now()) / 1000);
+export async function getLatestLedger(networkId = getActiveNetworkId()) {
+  const network = NETWORKS[networkId];
+  if (!network) {
+    throw new Error(`Unsupported network: ${networkId}`);
   }
 
-  return null;
-}
-
-/** @param {number} streak 1-based count of consecutive 429s on this network */
-export function computeHorizon429WaitSeconds(streak) {
-  const safeStreak = Math.max(1, streak);
-  return Math.min(
-    HORIZON_429_BASE_WAIT_SEC * 2 ** (safeStreak - 1),
-    HORIZON_429_MAX_WAIT_SEC
-  );
-}
-
-function resetHorizon429Backoff(networkId = getActiveNetworkId()) {
-  horizon429BackoffByNetwork.delete(networkId);
-}
-
-/**
- * Record a 429 for the active network and return how long to wait (seconds).
- * Prefers Horizon's Retry-After when present; otherwise 2 → 4 → 8 … capped at 30.
- * @param {unknown} error
- * @returns {number}
- */
-export function recordHorizon429(error) {
-  const networkId = getActiveNetworkId();
-  const prior = horizon429BackoffByNetwork.get(networkId) || { streak: 0 };
-  const streak = prior.streak + 1;
-  horizon429BackoffByNetwork.set(networkId, { streak });
-
-  const retryAfter = readRetryAfterSeconds(error);
-  if (retryAfter != null) return retryAfter;
-  return computeHorizon429WaitSeconds(streak);
-}
-
-/** Test helper: clear the shared backoff clocks. */
-export function resetHorizon429BackoffForTests() {
-  horizon429BackoffByNetwork.clear();
-}
-
-function abortError() {
-  const error = new Error("Aborted");
-  error.name = "AbortError";
-  return error;
-}
-
-function defaultSleep(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(abortError());
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-
-    function onAbort() {
-      clearTimeout(timer);
-      reject(abortError());
-    }
-
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-/**
- * Run a Horizon lab read with shared per-network 429 backoff.
- *
- * On 429: waits Retry-After (or 2/4/8…≤30s), then rejects with
- * {@link HORIZON_SLOWDOWN_MESSAGE}. A later success resets the clock.
- * A 500 (or any non-429) is rethrown unchanged. The wait is cancelled when
- * `signal` aborts (unmount / network change).
- *
- * @template T
- * @param {() => Promise<T>} fn
- * @param {object} [options]
- * @param {AbortSignal} [options.signal]
- * @param {(ms: number, signal?: AbortSignal) => Promise<void>} [options.sleep]
- * @returns {Promise<T>}
- */
-export async function withHorizon429Backoff(fn, options = {}) {
-  const { signal, sleep = defaultSleep } = options;
-
-  if (signal?.aborted) throw abortError();
-
-  try {
-    const result = await fn();
-    resetHorizon429Backoff();
-    return result;
-  } catch (error) {
-    if (!isHorizon429(error)) throw error;
-
-    const waitSeconds = recordHorizon429(error);
-    await sleep(waitSeconds * 1000, signal);
-    throw new Error(HORIZON_SLOWDOWN_MESSAGE, { cause: error });
+  const response = await new StellarSdk.Horizon.Server(network.horizonUrl)
+    .ledgers()
+    .order("desc")
+    .limit(1)
+    .call();
+  const ledger = response.records?.[0];
+  if (!ledger) {
+    throw new Error("Horizon returned no latest ledger.");
   }
+
+  const sequence = Number(ledger.sequence);
+  const closedAt = Date.parse(ledger.closed_at);
+  const baseFee = String(ledger.base_fee_in_stroops ?? "");
+  const baseReserve = String(ledger.base_reserve_in_stroops ?? "");
+  if (!Number.isSafeInteger(sequence) || sequence < 1) {
+    throw new Error("Latest ledger has an invalid sequence.");
+  }
+  if (!Number.isFinite(closedAt)) {
+    throw new Error("Latest ledger has an invalid close time.");
+  }
+  if (!/^\d+$/.test(baseFee)) {
+    throw new Error("Latest ledger has an invalid base fee.");
+  }
+  if (!/^[1-9]\d*$/.test(baseReserve)) {
+    throw new Error("Latest ledger has an invalid base reserve.");
+  }
+
+  return {
+    sequence,
+    closedAt: new Date(closedAt).toISOString(),
+    baseFeeInStroops: baseFee,
+    baseReserveInStroops: baseReserve,
+  };
 }
 
 /** The Kitewell backend is configured for Testnet, so skip it elsewhere. */
