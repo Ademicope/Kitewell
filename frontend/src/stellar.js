@@ -713,23 +713,112 @@ export async function getAccountDetails(publicKey, options = {}) {
   }, options);
 }
 
-export async function getLatestBaseReserve() {
-  const response = await getServer()
-    .ledgers()
-    .order("desc")
-    .limit(1)
-    .call();
-  const baseReserve = response.records?.[0]?.base_reserve_in_stroops;
-  if (!/^\d+$/.test(String(baseReserve ?? "")) || Number(baseReserve) <= 0) {
-    throw new Error("Latest ledger did not include a valid base reserve.");
+function offerAssetDescriptor(asset) {
+  if (asset === "native" || asset?.asset_type === "native") {
+    return { isNative: true };
   }
-  return String(baseReserve);
+  if (typeof asset === "string") {
+    const separator = asset.indexOf(":");
+    if (separator <= 0 || separator === asset.length - 1) {
+      throw new Error(`Horizon returned an invalid offer asset: ${asset}`);
+    }
+    return {
+      isNative: false,
+      code: asset.slice(0, separator),
+      issuer: asset.slice(separator + 1),
+    };
+  }
+  if (asset && asset.asset_code && asset.asset_issuer) {
+    return {
+      isNative: false,
+      code: asset.asset_code,
+      issuer: asset.asset_issuer,
+    };
+  }
+  throw new Error("Horizon returned an invalid offer asset.");
 }
 
-export { calculateMinimumBalance };
+/**
+ * Load and normalize the active offers for a Stellar account.
+ */
+export async function getAccountOffers(publicKey, options = {}) {
+  return withHorizon429Backoff(async () => {
+    const page = await getServer()
+      .offers()
+      .forAccount(publicKey)
+      .order("desc")
+      .call({ signal: options.signal });
 
-export async function getBalance(publicKey) {
-  const balances = await getAccountBalances(publicKey);
+    return page.records.map((offer) => {
+      const offerId = offer.id ?? offer.offer_id ?? offer.offerId;
+      const price = offer.price_r ?? offer.price;
+      if (
+        offerId === undefined ||
+        offer.amount === undefined ||
+        !price ||
+        price.n === undefined ||
+        price.d === undefined
+      ) {
+        throw new Error("Horizon returned an incomplete offer record.");
+      }
+
+      return {
+        offerId: String(offerId),
+        selling: offerAssetDescriptor(offer.selling),
+        buying: offerAssetDescriptor(offer.buying),
+        amount: String(offer.amount),
+        priceNumerator: String(price.n),
+        priceDenominator: String(price.d),
+      };
+    });
+  }, options);
+}
+
+function positivePricePart(value, label) {
+  const text = String(value ?? "").trim();
+  if (!/^\d+$/.test(text)) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  const number = Number(text);
+  if (!Number.isSafeInteger(number) || number > 2147483647) {
+    throw new Error(`${label} exceeds the Stellar price limit.`);
+  }
+  if (number < 1) throw new Error(`${label} must be a positive integer.`);
+  return number;
+}
+
+/**
+ * Build a manageSellOffer operation, including the zero-amount form used to
+ * cancel an existing offer by its offer ID.
+ */
+export function buildManageSellOffer({
+  selling,
+  buying,
+  amount,
+  priceNumerator,
+  priceDenominator,
+  offerId = "0",
+} = {}) {
+  const sellingAsset = buildAsset(selling);
+  const buyingAsset = buildAsset(buying);
+  if (sellingAsset.toString() === buyingAsset.toString()) {
+    throw new Error("Selling and buying assets must be different.");
+  }
+
+  return StellarSdk.Operation.manageSellOffer({
+    selling: sellingAsset,
+    buying: buyingAsset,
+    amount: String(amount ?? ""),
+    price: {
+      n: positivePricePart(priceNumerator, "Price numerator"),
+      d: positivePricePart(priceDenominator, "Price denominator"),
+    },
+    offerId: String(offerId),
+  });
+}
+
+export async function getBalance(publicKey, options = {}) {
+  const balances = await getAccountBalances(publicKey, options);
   const xlm = balances.find((b) => b.isNative);
   return xlm ? xlm.balance : "0";
 }

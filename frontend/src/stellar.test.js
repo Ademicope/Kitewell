@@ -14,10 +14,10 @@ vi.mock("./api", () => ({
   fetchPaymentsViaApi: vi.fn(),
 }));
 
-const { loadAccountMock, paymentsCallMock, ledgerCallMock } = vi.hoisted(() => ({
+const { loadAccountMock, paymentsCallMock, offersCallMock } = vi.hoisted(() => ({
   loadAccountMock: vi.fn(),
   paymentsCallMock: vi.fn(),
-  ledgerCallMock: vi.fn(),
+  offersCallMock: vi.fn(),
 }));
 
 vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
@@ -29,9 +29,9 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
       Server: vi.fn(function () {
         return {
           loadAccount: loadAccountMock,
-          ledgers: () => ({
-            order: () => ({
-              limit: () => ({ call: ledgerCallMock }),
+          offers: () => ({
+            forAccount: () => ({
+              order: () => ({ call: offersCallMock }),
             }),
           }),
           payments: () => ({
@@ -62,12 +62,14 @@ const { fetchAccountViaApi, fetchPaymentsViaApi } = await import("./api");
 const StellarSdk = await import("@stellar/stellar-sdk");
 const {
   buildAsset,
+  buildManageSellOffer,
   explorerAccountUrl,
   explorerTxUrl,
   fundWithFriendbot,
   getLatestLedger,
   getAccountBalances,
   getAccountDetails,
+  getAccountOffers,
   getBalance,
   getLatestBaseReserve,
   getTransactions,
@@ -110,7 +112,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   loadAccountMock.mockReset();
   paymentsCallMock.mockReset();
-  ledgerCallMock.mockReset();
+  offersCallMock.mockReset();
+  resetHorizon429BackoffForTests();
 });
 
 afterEach(() => {
@@ -228,59 +231,104 @@ describe("asset + path helpers", () => {
   });
 });
 
-describe("getOrderBook", () => {
+describe("manage sell offers", () => {
   const issuer = StellarSdk.Keypair.random().publicKey();
 
-  it("limits and maps fixture bids and asks", async () => {
-    orderBookCallMock.mockResolvedValue({
-      bids: Array.from({ length: 12 }, (_, index) => ({ amount: `${index + 1}`, price: `${index + 2}` })),
-      asks: [{ amount: "4", price: "1.25" }],
+  it("builds a real sell offer with the collected assets and rational price", () => {
+    const operation = buildManageSellOffer({
+      selling: { isNative: false, code: "USD", issuer },
+      buying: { isNative: true },
+      amount: "2",
+      priceNumerator: "3",
+      priceDenominator: "2",
     });
+    const payload = operation.body().manageSellOfferOp();
 
-    await expect(getOrderBook(StellarSdk.Asset.native(), new StellarSdk.Asset("USDC", issuer)))
-      .resolves.toEqual({
-        bids: Array.from({ length: 10 }, (_, index) => ({ amount: `${index + 1}`, price: `${index + 2}`, priceR: undefined })),
-        asks: [{ amount: "4", price: "1.25", priceR: undefined }],
-      });
-    expect(orderBookCallMock).toHaveBeenCalledTimes(1);
+    expect(operation.body().switch().name).toBe("manageSellOffer");
+    expect(payload.selling().switch().name).toBe("assetTypeCreditAlphanum4");
+    expect(payload.buying().switch().name).toBe("assetTypeNative");
+    expect(
+      payload
+        .selling()
+        .alphaNum4()
+        .assetCode()
+        .toString()
+        .replace(/\0/g, "")
+    ).toBe("USD");
+    expect(
+      StellarSdk.StrKey.encodeEd25519PublicKey(
+        payload.selling().alphaNum4().issuer().ed25519()
+      )
+    ).toBe(issuer);
+    expect(payload.amount().toString()).toBe("20000000");
+    expect(payload.price().n()).toBe(3);
+    expect(payload.price().d()).toBe(2);
+    expect(payload.offerId().toString()).toBe("0");
   });
 
-  it("rejects a same-asset pair before Horizon", async () => {
-    await expect(getOrderBook(StellarSdk.Asset.native(), StellarSdk.Asset.native()))
-      .rejects.toThrow("Selling and buying assets must be different.");
-    expect(orderBookCallMock).not.toHaveBeenCalled();
+  it("cancels the specified offer by building a zero-amount operation", () => {
+    const operation = buildManageSellOffer({
+      selling: { isNative: true },
+      buying: { isNative: false, code: "USD", issuer },
+      amount: "0",
+      priceNumerator: "1",
+      priceDenominator: "2",
+      offerId: "123",
+    });
+    const payload = operation.body().manageSellOfferOp();
+
+    expect(payload.amount().toString()).toBe("0");
+    expect(payload.offerId().toString()).toBe("123");
   });
 
-  it("preserves an empty book as empty arrays", async () => {
-    orderBookCallMock.mockResolvedValue({ bids: [], asks: [] });
-    await expect(getOrderBook(StellarSdk.Asset.native(), new StellarSdk.Asset("USDC", issuer)))
-      .resolves.toEqual({ bids: [], asks: [] });
+  it("rejects invalid price fractions and identical assets", () => {
+    expect(() =>
+      buildManageSellOffer({
+        selling: { isNative: true },
+        buying: { isNative: false, code: "USD", issuer },
+        amount: "1",
+        priceNumerator: "0",
+        priceDenominator: "1",
+      })
+    ).toThrow(/Price numerator must be a positive integer/);
+
+    expect(() =>
+      buildManageSellOffer({
+        selling: { isNative: true },
+        buying: { isNative: true },
+        amount: "1",
+        priceNumerator: "1",
+        priceDenominator: "1",
+      })
+    ).toThrow("Selling and buying assets must be different.");
   });
 });
 
-describe("order book read", () => {
-  const issuer = StellarSdk.Keypair.random().publicKey();
-
-  it("loads the selected selling and buying assets", async () => {
-    const selling = StellarSdk.Asset.native();
-    const buying = new StellarSdk.Asset("USDC", issuer);
-    const fixture = { asks: [{ price: "2", amount: "10" }], bids: [] };
-    orderBookCallMock.mockResolvedValue(fixture);
-
-    await expect(getOrderBook(selling, buying)).resolves.toEqual({
-      asks: [{ ...fixture.asks[0], priceR: undefined }],
-      bids: [],
+describe("getAccountOffers", () => {
+  it("maps Horizon offer assets and exact price parts for cancellation", async () => {
+    const issuer = StellarSdk.Keypair.random().publicKey();
+    offersCallMock.mockResolvedValue({
+      records: [
+        {
+          id: "123",
+          selling: `USD:${issuer}`,
+          buying: "native",
+          amount: "5.0000000",
+          price_r: { n: "3", d: "2" },
+        },
+      ],
     });
-    expect(orderBookCallMock).toHaveBeenCalledWith(selling, buying);
-  });
 
-  it("refuses an invalid pair before calling Horizon", async () => {
-    const native = StellarSdk.Asset.native();
-    await expect(getOrderBook(native, native)).rejects.toThrow(
-      "Selling and buying assets must be different."
-    );
-    await expect(getOrderBook(null, native)).rejects.toThrow(/two different valid assets/);
-    expect(orderBookCallMock).not.toHaveBeenCalled();
+    await expect(getAccountOffers("GTEST")).resolves.toEqual([
+      {
+        offerId: "123",
+        selling: { isNative: false, code: "USD", issuer },
+        buying: { isNative: true },
+        amount: "5.0000000",
+        priceNumerator: "3",
+        priceDenominator: "2",
+      },
+    ]);
   });
 });
 

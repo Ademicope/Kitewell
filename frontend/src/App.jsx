@@ -3,9 +3,9 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import {
   checkFreighterInstalled,
   connectFreighterWallet,
-  preparePaymentWithFreighter,
-  confirmPaymentWithFreighter,
-  sendPaymentWithFreighter,
+  buildPaymentEnvelope,
+  buildUnsignedEnvelope,
+  submitEnvelopeWithFreighter,
   pathPaymentWithFreighter,
   changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
@@ -42,7 +42,8 @@ import {
   getPendingTransactions,
   getClaimableBalances,
   getLiquidityPool,
-  getLatestBaseReserve,
+  getAccountOffers,
+  buildManageSellOffer,
   getTransactions,
   getClaimableBalances,
   explorerAccountUrl,
@@ -87,7 +88,7 @@ const TABS = [
   "Issuer",
   "Send",
   "Path",
-  "Claimable",
+  "Order",
   "History",
   "Fees",
   "Pending",
@@ -190,11 +191,15 @@ export default function App() {
     destIssuer: "",
     path: "",
   });
-  const [issueForm, setIssueForm] = useState({
-    code: "",
-    destination: "",
+  const [offerForm, setOfferForm] = useState({
+    sellingAssetKey: "native",
+    buyingAssetKey: "",
+    priceNumerator: "1",
+    priceDenominator: "1",
     amount: "",
   });
+  const [offerList, setOfferList] = useState([]);
+  const [loadingOffers, setLoadingOffers] = useState(false);
   const [pathResult, setPathResult] = useState(null);
   const [pathQuote, setPathQuote] = useState(null);
   const [unsignedEnvelope, setUnsignedEnvelope] = useState(null);
@@ -325,6 +330,9 @@ export default function App() {
 
   const xlmBalance = balances.find((b) => b.isNative)?.balance ?? null;
   const assetBalances = balances.filter((b) => !b.isPoolShare);
+  const sellableAssets = assetBalances.filter(
+    (asset) => Number.parseFloat(asset.available ?? asset.balance) > 0
+  );
   const poolShares = poolShareRows(balances, liquidityPools);
   const memoField = MEMO_FIELDS[sendForm.memoType];
   const activeNetwork = NETWORKS[networkId];
@@ -1451,132 +1459,138 @@ export default function App() {
     }
   };
 
-  const buildComposerEnvelope = async () => {
+  const refreshOfferData = async () => {
+    const [nextBalances, nextOffers] = await Promise.all([
+      getAccountBalances(publicKey),
+      getAccountOffers(publicKey),
+    ]);
+    setBalances(nextBalances);
+    setOfferList(nextOffers);
+  };
+
+  const handleListOffers = async () => {
     if (!publicKey) return showToast("Connect Freighter first.", "error");
-    if (!composerForm.destination) {
-      return showToast("Destination is required.", "error");
+    setLoadingOffers(true);
+    try {
+      setOfferList(await getAccountOffers(publicKey));
+    } catch (err) {
+      showToast(err.message || "Could not load active offers.", "error");
+    } finally {
+      setLoadingOffers(false);
     }
+  };
+
+  const handlePlaceOffer = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+
+    const sellingAsset = assetBalances.find(
+      (asset) => asset.key === offerForm.sellingAssetKey
+    );
+    const buyingAsset = assetBalances.find(
+      (asset) => asset.key === offerForm.buyingAssetKey
+    );
+    if (!sellingAsset || !buyingAsset) {
+      return showToast("Choose both selling and buying assets.", "error");
+    }
+    if (sellingAsset.key === buyingAsset.key) {
+      return showToast("Selling and buying assets must be different.", "error");
+    }
+
     let amount;
     try {
-      amount = validatePaymentAmount(composerForm.amount);
+      amount = validatePaymentAmount(offerForm.amount, "Offer amount");
     } catch (err) {
       return showToast(err.message, "error");
     }
-    if (
-      composerForm.memoType === "text" &&
-      new TextEncoder().encode(composerForm.memo).length > 28
-    ) {
-      return showToast("Text memos must be 28 UTF-8 bytes or fewer.", "error");
+
+    const available = Number.parseFloat(sellingAsset.available ?? sellingAsset.balance);
+    if (!Number.isFinite(available) || available <= 0) {
+      return showToast(`You do not hold any available ${sellingAsset.code}.`, "error");
     }
-
-    const selected = balances.find((b) => b.key === composerForm.assetKey);
-    if (!selected) {
-      return showToast("Choose an asset you hold a trustline for.", "error");
-    }
-
-    const asset = selected.isNative
-      ? { isNative: true }
-      : { isNative: false, code: selected.code, issuer: selected.issuer };
-
-    setLoading("composer");
-    try {
-      const transactionMemo = createMemoForComposer(composerForm.memoType, composerForm.memo);
-      const sourceAccount = await getServerForComposer().loadAccount(publicKey);
-      const txBuilder = new StellarSdk.TransactionBuilder(sourceAccount, {
-        fee: StellarSdk.BASE_FEE,
-        networkPassphrase: getCurrentPassphrase(),
-      }).addOperation(
-        StellarSdk.Operation.payment({
-          destination: composerForm.destination,
-          asset: resolvePaymentAsset(asset),
-          amount: amount.toString(),
-        })
+    if (Number(amount) > available) {
+      return showToast(
+        `Insufficient ${sellingAsset.code} balance. Available: ${available}.`,
+        "error"
       );
+    }
 
-      if (transactionMemo) {
-        txBuilder.addMemo(transactionMemo);
+    const describeAsset = (asset) =>
+      asset.isNative
+        ? { isNative: true }
+        : { isNative: false, code: asset.code, issuer: asset.issuer };
+
+    setLoading("offer-place");
+    try {
+      const operation = buildManageSellOffer({
+        selling: describeAsset(sellingAsset),
+        buying: describeAsset(buyingAsset),
+        amount,
+        priceNumerator: offerForm.priceNumerator,
+        priceDenominator: offerForm.priceDenominator,
+      });
+      const unsignedXdr = await buildUnsignedEnvelope(publicKey, [operation]);
+      const result = await submitEnvelopeWithFreighter(unsignedXdr, publicKey);
+      setOfferForm((previous) => ({ ...previous, amount: "" }));
+      showToast(
+        `Offer placed · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      startTxWatch(result.hash);
+      try {
+        await refreshOfferData();
+      } catch (refreshError) {
+        showToast(
+          `Offer submitted, but balances and offers could not refresh: ${refreshError.message}`,
+          "error",
+          explorerTxUrl(result.hash)
+        );
       }
-
-      const transaction = txBuilder.setTimeout(180).build();
-      const envelopeXdr = transaction.toXDR();
-      setComposerEnvelope(envelopeXdr);
-      showToast("Envelope built. Copy the SEP-7 URI below.");
     } catch (err) {
-      showToast(err.message || "Failed to build envelope.", "error");
+      trackFailedSubmit("manageSellOffer", err);
+      showToast(err.message || "Could not place offer.", "error");
     } finally {
       setLoading("");
     }
   };
 
-  const copyComposerUri = async () => {
-    if (!composerEnvelope) return showToast("No envelope to copy.", "error");
-    try {
-      const uri = buildSep7TxUri(composerEnvelope, getCurrentPassphrase());
-      await navigator.clipboard.writeText(uri);
-      showToast("SEP-7 URI copied to clipboard.");
-    } catch (err) {
-      showToast(err.message || "Failed to copy URI.", "error");
-    }
-  };
-
-  const handleDecoderPaste = () => {
-    setDecoderError(null);
-    setDecoderEnvelope(null);
-    setDecoderDetails(null);
-    setDecoderConfirmed(false);
-    if (!decoderInput.trim()) return;
-    try {
-      const envelopeXdr = parseSep7TxUri(decoderInput.trim(), getCurrentPassphrase());
-      
-      // Decode the envelope to get details
-      const transaction = StellarSdk.TransactionBuilder.fromXDR(envelopeXdr, getCurrentPassphrase());
-      const source = transaction.sourceAccount || "Unknown";
-      const fee = transaction.fee || "0";
-      const operationCount = transaction.operations?.length || 0;
-      const isSigned = transaction.signatures && transaction.signatures.length > 0;
-      
-      setDecoderDetails({ source, fee, operationCount, isSigned });
-      setDecoderEnvelope(envelopeXdr);
-      showToast("Envelope loaded into decoder.");
-    } catch (err) {
-      setDecoderError(err.message);
-      showToast(err.message, "error");
-    }
-  };
-
-  const handleDecoderSubmit = async () => {
-    if (!decoderEnvelope || !decoderConfirmed) return;
+  const handleCancelOffer = async (offer) => {
     if (!publicKey) return showToast("Connect Freighter first.", "error");
-    
-    setDecoderSubmitting(true);
+
+    setLoading(`offer-cancel-${offer.offerId}`);
     try {
-      const result = await submitEnvelope(decoderEnvelope, publicKey);
-      setDecoderEnvelope(null);
-      setDecoderDetails(null);
-      setDecoderConfirmed(false);
-      setDecoderInput("");
+      const operation = buildManageSellOffer({
+        selling: offer.selling,
+        buying: offer.buying,
+        amount: "0",
+        priceNumerator: offer.priceNumerator,
+        priceDenominator: offer.priceDenominator,
+        offerId: offer.offerId,
+      });
+      const unsignedXdr = await buildUnsignedEnvelope(publicKey, [operation]);
+      const result = await submitEnvelopeWithFreighter(unsignedXdr, publicKey);
       showToast(
-        `Transaction submitted · ${result.hash.slice(0, 12)}…`,
+        `Offer ${offer.offerId} cancelled · ${result.hash.slice(0, 12)}…`,
         "success",
         explorerTxUrl(result.hash)
       );
-      // Refresh balances after submission
-      const next = await getAccountBalances(publicKey);
-      setBalances(next);
+      startTxWatch(result.hash);
+      try {
+        await refreshOfferData();
+      } catch (refreshError) {
+        showToast(
+          `Offer cancelled, but balances and offers could not refresh: ${refreshError.message}`,
+          "error",
+          explorerTxUrl(result.hash)
+        );
+      }
     } catch (err) {
-      showToast(err.message || "Submit failed.", "error");
+      trackFailedSubmit("manageSellOffer", err);
+      showToast(err.message || "Could not cancel offer.", "error");
     } finally {
-      setDecoderSubmitting(false);
+      setLoading("");
     }
-  };
-
-  const handleDecoderCancel = () => {
-    setDecoderEnvelope(null);
-    setDecoderDetails(null);
-    setDecoderConfirmed(false);
-    setDecoderInput("");
-    setDecoderError(null);
-    showToast("Decoder cleared.");
   };
 
   const handleHistory = async () => {
@@ -2176,7 +2190,7 @@ export default function App() {
     setActiveTab(tab);
     if (tab === "Fees") loadFeeStats();
     if (tab === "History") handleHistory();
-    if (tab === "Claimable" && publicKey) handleClaimableRefresh();
+    if (tab === "Order" && publicKey) handleListOffers();
     if (tab === "Lab") {
       loadLabInfo();
       checkRpc();
@@ -3769,124 +3783,185 @@ export default function App() {
             </div>
           )}
 
-          {activeTab === "Offer" && (
-            <div className="section">
-              <h2>Price an offer</h2>
-              <p className="muted">
-                Read the live order book before pricing an offer. Selecting a row only fills the
-                price; nothing is signed or submitted.
-              </p>
-              <form onSubmit={handleOrderBook} className="form">
-                <label className="label" htmlFor="offer-selling-type">Selling asset</label>
-                <select id="offer-selling-type" className="input" value={offerForm.sellingType}
-                  onChange={(e) => updateOfferForm({ sellingType: e.target.value })}>
-                  <option value="native">XLM (native)</option>
-                  <option value="credit">Credit asset</option>
-                </select>
-                {offerForm.sellingType === "credit" && <>
-                  <input className="input" placeholder="Selling asset code, e.g. USDC" maxLength={12}
-                    value={offerForm.sellingCode} onChange={(e) => updateOfferForm({ sellingCode: e.target.value })} required />
-                  <input className="input" placeholder="Selling asset issuer G…"
-                    value={offerForm.sellingIssuer} onChange={(e) => updateOfferForm({ sellingIssuer: e.target.value })} required />
-                </>}
-                <label className="label" htmlFor="offer-buying-type">Buying asset</label>
-                <select id="offer-buying-type" className="input" value={offerForm.buyingType}
-                  onChange={(e) => updateOfferForm({ buyingType: e.target.value })}>
-                  <option value="native">XLM (native)</option>
-                  <option value="credit">Credit asset</option>
-                </select>
-                {offerForm.buyingType === "credit" && <>
-                  <input className="input" placeholder="Buying asset code, e.g. USDC" maxLength={12}
-                    value={offerForm.buyingCode} onChange={(e) => updateOfferForm({ buyingCode: e.target.value })} required />
-                  <input className="input" placeholder="Buying asset issuer G…"
-                    value={offerForm.buyingIssuer} onChange={(e) => updateOfferForm({ buyingIssuer: e.target.value })} required />
-                </>}
-                <label className="label" htmlFor="offer-price">Offer price (buying per selling)</label>
-                <input id="offer-price" className="input" type="number" min="0" step="any"
-                  value={offerForm.price} onChange={(e) => updateOfferForm({ price: e.target.value })}
-                  placeholder="Choose a bid or ask below" />
-                <button className="btn btn--primary" type="submit" disabled={loading === "order-book"}>
-                  {loading === "order-book" ? <><Spinner /> Loading book…</> : "Load order book"}
-                </button>
-              </form>
-              {orderBookError && <div className="info-box info-box--warning" role="alert">
-                <span className="eyebrow">Order book</span><p className="muted">{orderBookError}</p>
-              </div>}
-              {orderBook && <div className="order-book" aria-label="Order book">
-                {[['Bids', orderBook.bids], ['Asks', orderBook.asks]].map(([label, rows]) => (
-                  <div key={label} className="order-book__side">
-                    <h3 className="subhead">{label}</h3>
-                    {rows.length === 0 ? <p className="muted">No {label.toLowerCase()} available.</p> : (
-                      <div className="order-book__rows">
-                        {rows.map((row, index) => <button key={`${label}-${index}`} type="button"
-                          className="order-book__row" onClick={() => selectBookPrice(row)}>
-                          <span>{row.price}</span><span>{row.amount}</span>
-                        </button>)}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                <div className="order-book__header"><span>Price</span><span>Amount</span></div>
-              </div>}
-            </div>
-          )}
-          {activeTab === "Book" && (
+          {activeTab === "Order" && (
             <div className="section">
               <div className="section__row">
-                <h2>Order book</h2>
-                <button
-                  className="btn btn--secondary"
-                  type="button"
-                  onClick={() => {
-                    bookClearGenerationRef.current += 1;
-                    clearStoredOrderBookPair();
-                    setBookPair({ selling: "", buying: "" });
-                  }}
-                >
-                  Clear pair
-                </button>
+                <h2>Order Book</h2>
+                <p className="muted">
+                  Place, list, and cancel offers using your account assets.
+                </p>
               </div>
-              <p className="muted">Enter XLM or CODE:ISSUER for each asset.</p>
-              <div className="form">
-                <label className="label" htmlFor="book-selling">Selling asset</label>
-                <input
-                  id="book-selling"
-                  className="input"
-                  type="text"
-                  placeholder="XLM"
-                  value={bookPair.selling}
-                  onChange={(event) => setBookPair((pair) => ({ ...pair, selling: event.target.value }))}
-                />
-                <label className="label" htmlFor="book-buying">Buying asset</label>
-                <input
-                  id="book-buying"
-                  className="input"
-                  type="text"
-                  placeholder="USDC:G…"
-                  value={bookPair.buying}
-                  onChange={(event) => setBookPair((pair) => ({ ...pair, buying: event.target.value }))}
-                />
-              </div>
-              {!parsedBookPair && (
-                <p className="muted">Choose two different valid assets to load the book.</p>
-              )}
-              {parsedBookPair && !currentBookResult && (
-                <p className="muted" role="status">Loading order book…</p>
-              )}
-              {currentBookResult?.error && (
-                <p className="muted" role="alert">{currentBookResult.error}</p>
-              )}
-              {currentBookResult?.data && (
-                <div className="info-box">
-                  <strong>Asks</strong>
-                  {currentBookResult.data.asks?.length ? currentBookResult.data.asks.slice(0, 10).map((offer, index) => (
-                    <span key={index}>Price {offer.price} · Amount {offer.amount}</span>
-                  )) : <span className="muted">No asks</span>}
-                  <strong>Bids</strong>
-                  {currentBookResult.data.bids?.length ? currentBookResult.data.bids.slice(0, 10).map((offer, index) => (
-                    <span key={index}>Price {offer.price} · Amount {offer.amount}</span>
-                  )) : <span className="muted">No bids</span>}
-                </div>
+              {publicKey ? (
+                <>
+                  <form className="form" onSubmit={handlePlaceOffer}>
+                    <label className="label" htmlFor="offer-selling-asset">
+                      Selling asset
+                    </label>
+                    <select
+                      id="offer-selling-asset"
+                      className="input"
+                      value={offerForm.sellingAssetKey}
+                      onChange={(e) =>
+                        setOfferForm({
+                          ...offerForm,
+                          sellingAssetKey: e.target.value,
+                        })
+                      }
+                      required
+                    >
+                      <option value="" disabled>
+                        Choose a held asset
+                      </option>
+                      {sellableAssets.map((asset) => (
+                        <option key={asset.key} value={asset.key}>
+                          {asset.isNative
+                            ? "XLM (native)"
+                            : `${asset.code} · ${shortenAddress(asset.issuer)}`}
+                        </option>
+                      ))}
+                    </select>
+                    <label className="label" htmlFor="offer-buying-asset">
+                      Buying asset
+                    </label>
+                    <select
+                      id="offer-buying-asset"
+                      className="input"
+                      value={offerForm.buyingAssetKey}
+                      onChange={(e) =>
+                        setOfferForm({
+                          ...offerForm,
+                          buyingAssetKey: e.target.value,
+                        })
+                      }
+                      required
+                    >
+                      <option value="" disabled>
+                        Choose an asset you can receive
+                      </option>
+                      {assetBalances.map((asset) => (
+                        <option key={asset.key} value={asset.key}>
+                          {asset.isNative
+                            ? "XLM (native)"
+                            : `${asset.code} · ${shortenAddress(asset.issuer)}`}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="muted">
+                      Price is the buying-asset amount per one selling-asset unit.
+                    </p>
+                    <label className="label" htmlFor="offer-price-numerator">
+                      Price numerator
+                    </label>
+                    <input
+                      id="offer-price-numerator"
+                      className="input"
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={offerForm.priceNumerator}
+                      onChange={(e) =>
+                        setOfferForm({
+                          ...offerForm,
+                          priceNumerator: e.target.value,
+                        })
+                      }
+                      required
+                    />
+                    <label className="label" htmlFor="offer-price-denominator">
+                      Price denominator
+                    </label>
+                    <input
+                      id="offer-price-denominator"
+                      className="input"
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={offerForm.priceDenominator}
+                      onChange={(e) =>
+                        setOfferForm({
+                          ...offerForm,
+                          priceDenominator: e.target.value,
+                        })
+                      }
+                      required
+                    />
+                    <label className="label" htmlFor="offer-amount">
+                      Amount to sell
+                    </label>
+                    <input
+                      id="offer-amount"
+                      className="input"
+                      type="number"
+                      min="0.0000001"
+                      step="0.0000001"
+                      value={offerForm.amount}
+                      onChange={(e) =>
+                        setOfferForm({
+                          ...offerForm,
+                          amount: e.target.value,
+                        })
+                      }
+                      required
+                    />
+                    <button
+                      className="btn btn--primary"
+                      type="submit"
+                      disabled={loading === "offer-place"}
+                    >
+                      {loading === "offer-place" ? "Submitting…" : "Place offer"}
+                    </button>
+                  </form>
+
+                  <div className="section__row">
+                    <h3 className="subhead">Active offers</h3>
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      onClick={handleListOffers}
+                      disabled={loadingOffers}
+                    >
+                      {loadingOffers ? "Loading…" : "Refresh offers"}
+                    </button>
+                  </div>
+                  {offerList.length > 0 ? (
+                    <ul className="balance-list">
+                      {offerList.map((offer) => {
+                        const assetLabel = (asset) =>
+                          asset.isNative
+                            ? "XLM"
+                            : `${asset.code} · ${shortenAddress(asset.issuer)}`;
+                        return (
+                          <li key={offer.offerId} className="balance-row">
+                            <div>
+                              <strong>Offer {offer.offerId}</strong>
+                              <p className="muted">
+                                Sell {offer.amount} {assetLabel(offer.selling)} for{" "}
+                                {assetLabel(offer.buying)} at{" "}
+                                {offer.priceNumerator}/{offer.priceDenominator}
+                              </p>
+                            </div>
+                            <button
+                              className="btn btn--secondary btn--sm"
+                              type="button"
+                              onClick={() => handleCancelOffer(offer)}
+                              disabled={
+                                loading === `offer-cancel-${offer.offerId}`
+                              }
+                            >
+                              {loading === `offer-cancel-${offer.offerId}`
+                                ? "Cancelling…"
+                                : "Cancel"}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : (
+                    <p className="muted">No active offers loaded.</p>
+                  )}
+                </>
+              ) : (
+                <p className="muted">Connect Freighter to manage offers.</p>
               )}
             </div>
           )}
