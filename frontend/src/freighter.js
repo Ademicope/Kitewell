@@ -254,6 +254,24 @@ export async function restoreContractWithFreighter(publicKey, contractId) {
 }
 
 /**
+ * Rename a registered builder's nickname with Freighter.
+ * Builds + simulates a Soroban `rename(caller, new_name)` invoke, lets
+ * Freighter sign it, then submits via Soroban RPC and waits for confirmation.
+ * The builder count stays stable.
+ *
+ * @param {string} publicKey - The signing account (must be already registered)
+ * @param {string} contractId - The contract's C… address
+ * @param {string} newName - The new builder name (1–64 characters)
+ * @returns {Promise<{ hash: string, confirmed: boolean }>}
+ */
+export async function renameBuilderWithFreighter(
+  publicKey,
+  contractId,
+  newName
+) {
+  const trimmed = (newName || "").trim();
+  if (!trimmed) {
+    throw new Error("Enter a builder name to rename.");
  * Simulate the builder registration without signing or submitting it, so the
  * panel can show the inclusion fee and the resource fee separately.
  *
@@ -285,6 +303,7 @@ export async function simulateRegisterBuilder(publicKey, contractId, name) {
   const sourceAccount = await sorobanRpc.getAccount(publicKey);
   const transaction = buildContractTx(
     contract,
+    "rename",
     "register",
     [
       StellarSdk.nativeToScVal(publicKey, { type: "address" }),
@@ -293,6 +312,36 @@ export async function simulateRegisterBuilder(publicKey, contractId, name) {
     sourceAccount
   );
 
+  // Simulation fills in auth entries + resource fees for the invoke.
+  const prepared = await sorobanRpc.prepareTransaction(transaction);
+  const signedTx = await signWithFreighter(prepared.toXDR(), publicKey);
+  const sendResult = await sorobanRpc.sendTransaction(signedTx);
+
+  if (sendResult.status === "ERROR") {
+    throw new Error(
+      `Contract invoke rejected by the network. Tx hash: ${sendResult.hash}`
+    );
+  }
+
+  // RPC submission is asynchronous: poll getTransaction until applied.
+  for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
+    const status = await sorobanRpc.getTransaction(sendResult.hash);
+    if (status.status === "SUCCESS") {
+      return {
+        hash: sendResult.hash,
+        confirmed: true,
+      };
+    }
+    if (status.status === "FAILED") {
+      throw new Error(
+        `Contract invoke failed on-chain. Tx hash: ${sendResult.hash}`
+      );
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+
+  // Still pending after the polling window; the tx may land shortly.
+  return { hash: sendResult.hash, confirmed: false };
   // Simulation only: the user still has to press Sign to submit.
   const simulation = await sorobanRpc.simulateTransaction(transaction);
   return parseSimulationFees(simulation, transaction.fee);

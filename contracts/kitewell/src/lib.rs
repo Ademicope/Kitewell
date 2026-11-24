@@ -201,6 +201,37 @@ impl Kitewell {
         Ok(())
     }
 
+    /// Rename a builder's existing nickname. Count unchanged.
+    ///
+    /// Auth-gated to `caller`. Requires the caller to already be registered,
+    /// and rejects an empty new name just like `register`. Blocked while
+    /// paused. On success the stored name updates and `COUNT` stays stable,
+    /// so a builder who mistyped can edit in place without inflating the
+    /// count.
+    pub fn rename(env: Env, caller: Address, new_name: String) -> Result<(), Error> {
+        caller.require_auth();
+
+        // Empty-name guard: payload validation.
+        if new_name.is_empty() {
+            return Err(Error::EmptyName);
+        }
+
+        let paused: bool = env.storage().instance().get(&PAUSED).unwrap_or(false);
+        if paused {
+            return Err(Error::Paused);
+        }
+
+        let key = (LAB, caller.clone());
+        if !env.storage().persistent().has(&key) {
+            return Err(Error::NotRegistered);
+        }
+
+        env.storage().persistent().set(&key, &new_name);
+        env.storage().persistent().extend_ttl(&key, 1000, 5000);
+
+        Ok(())
+    }
+
     /// Remove the caller's own check-in.
     ///
     /// Auth-gated to `caller`, and blocked while paused just like `register`.
@@ -476,5 +507,112 @@ mod test {
         // A never-registered address has no entry even alongside real ones.
         assert_eq!(client.get_builder(&stranger), None);
         assert_eq!(client.builder_count(), 1);
+    }
+
+    #[test]
+    fn rename_changes_name_without_changing_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(Kitewell, ());
+        let client = KitewellClient::new(&env, &id);
+        let a = Address::generate(&env);
+
+        // Register first
+        client.register(&a, &String::from_str(&env, "typo"));
+        assert_eq!(client.builder_count(), 1);
+        assert_eq!(
+            client.get_builder(&a),
+            Some(String::from_str(&env, "typo"))
+        );
+
+        // Rename keeps the count stable
+        client.rename(&a, &String::from_str(&env, "fixed"));
+        assert_eq!(client.builder_count(), 1);
+        assert_eq!(
+            client.get_builder(&a),
+            Some(String::from_str(&env, "fixed"))
+        );
+    }
+
+    #[test]
+    fn rename_twice_keeps_count_stable() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(Kitewell, ());
+        let client = KitewellClient::new(&env, &id);
+        let a = Address::generate(&env);
+
+        client.register(&a, &String::from_str(&env, "first"));
+        assert_eq!(client.builder_count(), 1);
+
+        client.rename(&a, &String::from_str(&env, "second"));
+        assert_eq!(client.builder_count(), 1);
+
+        client.rename(&a, &String::from_str(&env, "third"));
+        assert_eq!(client.builder_count(), 1);
+        assert_eq!(
+            client.get_builder(&a),
+            Some(String::from_str(&env, "third"))
+        );
+    }
+
+    #[test]
+    fn rename_rejects_unregistered_caller() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(Kitewell, ());
+        let client = KitewellClient::new(&env, &id);
+        let a = Address::generate(&env);
+
+        assert_eq!(
+            client.try_rename(&a, &String::from_str(&env, "nope")),
+            Err(Ok(Error::NotRegistered))
+        );
+        assert_eq!(client.get_builder(&a), None);
+        assert_eq!(client.builder_count(), 0);
+    }
+
+    #[test]
+    fn rename_rejects_empty_name() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(Kitewell, ());
+        let client = KitewellClient::new(&env, &id);
+        let a = Address::generate(&env);
+
+        client.register(&a, &String::from_str(&env, "valid"));
+        assert_eq!(
+            client.try_rename(&a, &String::from_str(&env, "")),
+            Err(Ok(Error::EmptyName))
+        );
+        // Name unchanged
+        assert_eq!(
+            client.get_builder(&a),
+            Some(String::from_str(&env, "valid"))
+        );
+    }
+
+    #[test]
+    fn rename_rejects_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(Kitewell, ());
+        let client = KitewellClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let a = Address::generate(&env);
+
+        client.init(&admin);
+        client.register(&a, &String::from_str(&env, "before"));
+        client.set_paused(&admin, &true);
+
+        assert_eq!(
+            client.try_rename(&a, &String::from_str(&env, "blocked")),
+            Err(Ok(Error::Paused))
+        );
+        // Name unchanged
+        assert_eq!(
+            client.get_builder(&a),
+            Some(String::from_str(&env, "before"))
+        );
     }
 }
