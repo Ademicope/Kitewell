@@ -270,6 +270,40 @@ export async function getAccountMergeBlockers(publicKey) {
 export const accountMergeBlockers = mergeBlockersFromAccount;
 export const validateAccountMergeDestination = validateAccountMerge;
 
+export function accountLedgerStatus(lastModifiedLedger, latestLedger) {
+  const accountLedger = Number(lastModifiedLedger);
+  const horizonLedger = Number(latestLedger);
+  if (
+    lastModifiedLedger == null ||
+    latestLedger == null ||
+    !Number.isFinite(accountLedger) ||
+    !Number.isFinite(horizonLedger)
+  ) {
+    return {
+      lastModifiedLedger: Number.isFinite(accountLedger) && lastModifiedLedger != null
+        ? accountLedger
+        : null,
+      latestLedger: Number.isFinite(horizonLedger) && latestLedger != null
+        ? horizonLedger
+        : null,
+      state: "unknown",
+      message: "Ledger age unknown.",
+    };
+  }
+
+  const behindBy = Math.max(0, horizonLedger - accountLedger);
+  return {
+    lastModifiedLedger: accountLedger,
+    latestLedger: horizonLedger,
+    behindBy,
+    state: behindBy > 0 ? "behind" : "current",
+    message:
+      behindBy > 0
+        ? `Account figures are ${behindBy} ledger${behindBy === 1 ? "" : "s"} behind.`
+        : "Account figures match Horizon's latest ledger.",
+  };
+}
+
 /** Stellar account flag bits (from Stellar's `AccountFlags`). */
 export const ACCOUNT_FLAG_BITS = {
   authRequired: 1,
@@ -711,6 +745,7 @@ export async function getAccountDetails(publicKey, options = {}) {
     id: account.id,
     sequence: account.sequenceNumber(),
     subentryCount: account.subentry_count,
+    lastModifiedLedger: account.last_modified_ledger ?? null,
     thresholds: account.thresholds,
     signers: account.signers,
     balances: mapHorizonBalances(account),
@@ -725,6 +760,7 @@ export async function getAccountDetails(publicKey, options = {}) {
       id: account.id,
       sequence: account.sequenceNumber(),
       subentryCount: account.subentry_count,
+      lastModifiedLedger: account.last_modified_ledger ?? null,
       thresholds: account.thresholds,
       balances: mapHorizonBalances(account, baseReserve),
       explorerUrl: explorerAccountUrl(publicKey),

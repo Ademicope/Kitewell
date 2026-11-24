@@ -158,6 +158,7 @@ export function createApp({ horizon, env = process.env } = {}) {
         id: account.id,
         sequence: account.sequenceNumber(),
         subentryCount: account.subentry_count,
+        lastModifiedLedger: account.last_modified_ledger ?? null,
         thresholds: account.thresholds,
         balances,
         signers: account.signers || [],

@@ -119,6 +119,7 @@ function accountFixture(overrides = {}) {
     id: VALID_ADDRESS,
     sequenceNumber: () => "123456789012345678",
     subentry_count: 1,
+    last_modified_ledger: 987654,
     thresholds: {
       low_threshold: 1,
       med_threshold: 2,
@@ -209,6 +210,7 @@ test("GET /api/account/:address maps a Horizon account into the API body", async
     id: VALID_ADDRESS,
     sequence: "123456789012345678",
     subentryCount: 1,
+    lastModifiedLedger: 987654,
     thresholds: { low_threshold: 1, med_threshold: 2, high_threshold: 3 },
     signers: [],
     balances: [

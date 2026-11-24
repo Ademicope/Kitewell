@@ -12,24 +12,18 @@ export async function fetchHealth() {
   return res.json();
 }
 
-/**
- * Build the `network` query the backend uses to pick its Horizon.
- * Omitted when no network is passed, so the backend's Testnet default applies.
- */
-function networkParam(params, network) {
-  if (network) params.set("network", network);
-  return params;
+/** Read the latest ledger sequence directly from the selected Horizon. */
+export async function fetchLatestHorizonLedger(horizonUrl) {
+  const base = String(horizonUrl || "").replace(/\/$/, "");
+  const res = await fetch(`${base}/ledgers?order=desc&limit=1`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error("Latest Horizon ledger fetch failed");
+  const sequence = data?._embedded?.records?.[0]?.sequence;
+  return sequence == null ? null : Number(sequence);
 }
 
-/**
- * Fetch account details from the backend for `network` (TESTNET/FUTURENET).
- * Omitting `network` leaves the request on the backend's Testnet default.
- */
-export async function fetchAccountViaApi(publicKey, network) {
-  const params = networkParam(new URLSearchParams(), network);
-  const query = params.toString() ? `?${params.toString()}` : "";
-
-  const res = await fetch(`${API_BASE}/api/account/${publicKey}${query}`);
+export async function fetchAccountViaApi(publicKey) {
+  const res = await fetch(`${API_BASE}/api/account/${publicKey}`);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Account fetch failed");
   return data;
