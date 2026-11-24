@@ -25,7 +25,7 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
           payments: () => ({
             forAccount: () => ({
               limit: () => ({
-                order: () => ({ call: paymentsCallMock }),
+                order: () => ({ join: () => ({ call: paymentsCallMock }) }),
               }),
             }),
           }),

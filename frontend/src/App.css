@@ -576,6 +576,10 @@ body {
 .tx-item__addr {
   font-size: 11px;
 }
+.tx-item__fee {
+  grid-column: 1 / -1;
+  font-size: 11px;
+}
 .tx-item__link {
   font-size: 11px;
   color: var(--info);
