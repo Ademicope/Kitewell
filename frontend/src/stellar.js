@@ -547,6 +547,20 @@ export async function getBalance(publicKey, options = {}) {
   return xlm ? xlm.balance : "0";
 }
 
+/** Load all open offers owned by the connected account from Horizon. */
+export async function getOpenOffers(publicKey, options = {}) {
+  return withHorizon429Backoff(async () => {
+    let page = await getServer().offers().forAccount(publicKey).limit(200).call();
+    const offers = [];
+    while (page.records.length > 0) {
+      offers.push(...page.records);
+      if (page.records.length < 200) break;
+      page = await page.next();
+    }
+    return offers;
+  }, options);
+}
+
 /**
  * Load one liquidity pool (both reserves and total shares) from Horizon.
  *

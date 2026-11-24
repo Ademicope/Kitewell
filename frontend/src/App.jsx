@@ -5,6 +5,7 @@ import {
   buildPaymentEnvelope,
   submitEnvelopeWithFreighter,
   pathPaymentWithFreighter,
+  changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
@@ -28,6 +29,7 @@ import {
   fundWithFriendbot,
   getAccountBalances,
   getAccountDetails,
+  getOpenOffers,
   getPendingTransactions,
   getLiquidityPool,
   getTransactions,
@@ -68,6 +70,7 @@ const TABS = [
   "Wallet",
   "Fund",
   "Assets",
+  "Offers",
   "Issuer",
   "Send",
   "Path",
@@ -133,6 +136,12 @@ export default function App() {
   });
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [limitChangeForm, setLimitChangeForm] = useState({});
+  const [openOffers, setOpenOffers] = useState([]);
+  const [offerPrices, setOfferPrices] = useState({});
+  const [offerError, setOfferError] = useState(null);
+  const [offerLoading, setOfferLoading] = useState(false);
+  const [offerRefresh, setOfferRefresh] = useState(0);
+  const [offerResult, setOfferResult] = useState(null);
   const [pathForm, setPathForm] = useState({
     mode: "strictSend",
     destination: "",
@@ -274,6 +283,31 @@ export default function App() {
   }, []);
 
   useEffect(() => () => cancelHorizonReads(), []);
+
+  useEffect(() => {
+    if (activeTab !== "Offers" || !publicKey) return;
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => {
+        if (cancelled) return null;
+        setOfferLoading(true);
+        setOfferError(null);
+        return getOpenOffers(publicKey);
+      })
+      .then((offers) => {
+        if (!cancelled && offers) setOpenOffers(offers);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setOpenOffers([]);
+          setOfferError(error.message || "Could not load open offers.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setOfferLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [activeTab, publicKey, networkId, offerRefresh]);
 
   // A pool-share balance only says how many shares the account holds. Load
   // each pool so the panel can also show both reserves and the total shares.
@@ -424,6 +458,9 @@ export default function App() {
       const address = await connectFreighterWallet();
       setPublicKey(address);
       setBalances([]);
+      setOpenOffers([]);
+      setOfferPrices({});
+      setOfferResult(null);
       setTransactions([]);
       setPendingTransactions([]);
       setPendingError(null);
@@ -446,6 +483,9 @@ export default function App() {
     setFailedSubmits([]);
     setPublicKey(null);
     setBalances([]);
+    setOpenOffers([]);
+    setOfferPrices({});
+    setOfferResult(null);
     setTransactions([]);
     setPendingTransactions([]);
     setPendingError(null);
@@ -462,6 +502,9 @@ export default function App() {
       const next = setActiveNetwork(id);
       setNetworkId(id);
       setBalances([]);
+      setOpenOffers([]);
+      setOfferPrices({});
+      setOfferResult(null);
       setTransactions([]);
       setPendingTransactions([]);
       setPendingError(null);
@@ -814,6 +857,32 @@ export default function App() {
     } catch (err) {
       trackFailedSubmit("pathPayment", err);
       showToast(err.message || "Path payment failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleOfferPriceChange = async (event, offer) => {
+    event.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    const newPrice = offerPrices[offer.id]?.trim();
+    setLoading("offer");
+    setOfferResult(null);
+    try {
+      const result = await changeOfferPriceWithFreighter(publicKey, offer, newPrice);
+      setOfferResult({
+        id: offer.id,
+        oldPrice: result.oldPrice,
+        newPrice,
+        hash: result.hash,
+      });
+      setOfferPrices((previous) => ({ ...previous, [offer.id]: "" }));
+      setOfferRefresh((count) => count + 1);
+      showToast(`Offer ${offer.id} price change submitted.`);
+      startTxWatch(result.hash);
+    } catch (error) {
+      trackFailedSubmit("manageSellOffer", error);
+      showToast(error.message || "Could not change offer price.", "error");
     } finally {
       setLoading("");
     }
@@ -1663,6 +1732,73 @@ export default function App() {
                   "Request Friendbot XLM"
                 )}
               </button>
+            </div>
+          )}
+
+          {activeTab === "Offers" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Open offers</h2>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={() => setOfferRefresh((count) => count + 1)}
+                  disabled={offerLoading || loading === "offer" || requireWallet}
+                >
+                  Refresh
+                </button>
+              </div>
+              <p className="muted">
+                Change the price of one offer. Its remaining amount and offer ID stay the same.
+              </p>
+              {requireWallet ? (
+                <p className="muted">Connect Freighter to view your offers.</p>
+              ) : offerLoading ? (
+                <p className="muted" role="status">Loading open offers…</p>
+              ) : offerError ? (
+                <p className="muted" role="alert">{offerError}</p>
+              ) : openOffers.length === 0 ? (
+                <p className="muted">No open offers on this network.</p>
+              ) : (
+                <ul className="balance-list">
+                  {openOffers.map((offer) => (
+                    <li key={offer.id} className="balance-row offer-row">
+                      <strong>
+                        {offer.selling.asset_code || "XLM"} → {offer.buying.asset_code || "XLM"}
+                      </strong>
+                      <span className="muted">Offer #{offer.id} · Remaining {offer.amount} {offer.selling.asset_code || "XLM"}</span>
+                      <form className="form" onSubmit={(event) => handleOfferPriceChange(event, offer)}>
+                        <label className="label" htmlFor={`offer-price-${offer.id}`}>
+                          New price ({offer.buying.asset_code || "XLM"} per {offer.selling.asset_code || "XLM"})
+                        </label>
+                        <input
+                          id={`offer-price-${offer.id}`}
+                          className="input"
+                          type="text"
+                          inputMode="decimal"
+                          required
+                          value={offerPrices[offer.id] || ""}
+                          onChange={(event) => setOfferPrices((previous) => ({ ...previous, [offer.id]: event.target.value }))}
+                        />
+                        <span className="muted">Current price: {offer.price} → New price: {offerPrices[offer.id] || "—"}</span>
+                        <button className="btn btn--primary" type="submit" disabled={loading === "offer" || offerLoading}>
+                          {loading === "offer" ? "Signing…" : "Sign price change"}
+                        </button>
+                      </form>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {offerResult && (
+                <div className="info-box" role="status">
+                  <span className="eyebrow">Offer #{offerResult.id} price change submitted</span>
+                  <p>Old price: {offerResult.oldPrice} → New price: {offerResult.newPrice}</p>
+                  <a className="text-link" href={explorerTxUrl(offerResult.hash)} target="_blank" rel="noreferrer">
+                    View transaction ↗
+                  </a>
+                </div>
+              )}
+              {txWatchPanel}
             </div>
           )}
 
