@@ -57,6 +57,7 @@ import {
   IMMUTABLE_CONFIRMATION,
   watchOfferUntilGone,
 } from "./stellar";
+import { formatHistoryFee } from "./historyFee";
 import {
   clearStoredOrderBookPair,
   parseOrderBookPair,
@@ -6074,6 +6075,9 @@ export default function App() {
                         >
                           Explorer ↗
                         </a>
+                        <div className="tx-item__fee muted">
+                          {formatHistoryFee(tx)}
+                        </div>
                         {createdAt && (
                           <time
                             className="tx-item__time"

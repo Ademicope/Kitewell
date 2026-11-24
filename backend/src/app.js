@@ -3,7 +3,8 @@ import cors from "cors";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { mapBalances } from "./mapBalances.js";
 import { createRateLimiter } from "./rateLimit.js";
-import { resolveNetwork, resolveRequestNetwork } from "./networkConfig.js";
+import { resolveNetwork } from "./networkConfig.js";
+import { mapTransactionFee } from "./transactionFee.js";
 
 /**
  * Build the Kitewell Express app.
@@ -194,7 +195,9 @@ export function createApp({ horizon, env = process.env } = {}) {
         .payments()
         .forAccount(address)
         .limit(limit)
-        .order("desc");
+        .order("desc")
+        // Embeds each payment's transaction record, the source of fee and operation count.
+        .join("transactions");
 
       // Paging backwards from the caller's cursor; omit it for the first page.
       if (cursor) request = request.cursor(cursor);
@@ -212,7 +215,8 @@ export function createApp({ horizon, env = process.env } = {}) {
           asset_code: p.asset_code || "XLM",
           transaction_hash: p.transaction_hash,
           created_at: p.created_at,
-          explorerUrl: `${network.explorerBase}/tx/${p.transaction_hash}`,
+          ...mapTransactionFee(p.transaction),
+          explorerUrl: `${EXPLORER_BASE}/tx/${p.transaction_hash}`,
         }));
 
       // A full page of raw records means there may be older ones; the cursor

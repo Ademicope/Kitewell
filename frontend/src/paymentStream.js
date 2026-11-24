@@ -1,5 +1,6 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { NETWORKS, getActiveNetworkId } from "./network";
+import { mapTransactionFee } from "./historyFee";
 
 /**
  * Stream payments for the connected account while the history tab is open.
@@ -44,6 +45,8 @@ export function paymentsStreamUrl(horizonUrl, publicKey, { cursor, limit = STREA
     `${horizonUrl.replace(/\/$/, "")}/accounts/${publicKey}${PAYMENTS_PATH}`
   );
   url.searchParams.set("limit", String(limit));
+  // Embeds each payment's transaction record, the source of fee and operation count.
+  url.searchParams.set("join", "transactions");
   if (cursor !== undefined && cursor !== null && String(cursor).trim()) {
     url.searchParams.set("cursor", String(cursor).trim());
   } else {
@@ -70,6 +73,7 @@ export function mapStreamPayment(event) {
     asset_code: event.asset_code || "XLM",
     transaction_hash: event.transaction_hash,
     created_at: event.created_at,
+    ...mapTransactionFee(event.transaction),
   };
 }
 

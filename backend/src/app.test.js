@@ -28,7 +28,7 @@ function testEnv(overrides = {}) {
 function stubHorizon({ account, accountError, payments, paymentsError } = {}) {
   const calls = {
     loadAccount: [],
-    payments: { forAccount: null, limit: null, order: null, cursor: null },
+    payments: { forAccount: null, limit: null, order: null, cursor: null, join: null },
   };
 
   return {
@@ -55,6 +55,10 @@ function stubHorizon({ account, accountError, payments, paymentsError } = {}) {
           },
           cursor(value) {
             calls.payments.cursor = value;
+            return builder;
+          },
+          join(value) {
+            calls.payments.join = value;
             return builder;
           },
           async call() {
@@ -294,6 +298,7 @@ test("GET /api/payments/:address filters out non-payment records", async (t) => 
           asset_code: "USDC",
           transaction_hash: "hash-payment",
           created_at: "2026-01-02T00:00:00Z",
+          transaction: { fee_charged: "100", operation_count: 1 },
         },
         {
           id: "3",
@@ -323,6 +328,7 @@ test("GET /api/payments/:address filters out non-payment records", async (t) => 
   assert.equal(status, 200);
   assert.deepEqual(stub.calls.payments.forAccount, VALID_ADDRESS);
   assert.equal(stub.calls.payments.order, "desc");
+  assert.equal(stub.calls.payments.join, "transactions");
   assert.equal(body.records.length, 2);
   assert.equal(body.nextCursor, null, "a short page is the last page");
   assert.deepEqual(body.records, [
@@ -335,6 +341,9 @@ test("GET /api/payments/:address filters out non-payment records", async (t) => 
       asset_code: "USDC",
       transaction_hash: "hash-payment",
       created_at: "2026-01-02T00:00:00Z",
+      fee_charged: "100",
+      operation_count: 1,
+      fee_bumped: false,
       explorerUrl: "https://explorer.test.invalid/tx/hash-payment",
     },
     {
@@ -346,6 +355,9 @@ test("GET /api/payments/:address filters out non-payment records", async (t) => 
       asset_code: "XLM",
       transaction_hash: "hash-native",
       created_at: "2026-01-04T00:00:00Z",
+      fee_charged: null,
+      operation_count: null,
+      fee_bumped: false,
       explorerUrl: "https://explorer.test.invalid/tx/hash-native",
     },
   ]);

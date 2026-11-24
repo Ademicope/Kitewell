@@ -1,6 +1,7 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { fetchAccountViaApi, fetchPaymentsViaApi } from "./api";
 import { normaliseTxHash } from "./txStatusWatch";
+import { mapTransactionFee } from "./historyFee";
 import {
   getActiveNetwork,
   getActiveNetworkId,
@@ -941,6 +942,8 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
       .forAccount(publicKey)
       .limit(limit)
       .order("desc")
+      // Embeds each payment's transaction record, the source of fee and operation count.
+      .join("transactions")
       .call();
 
     return {
@@ -955,6 +958,7 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
           asset_code: p.asset_code || "XLM",
           transaction_hash: p.transaction_hash,
           created_at: p.created_at,
+          ...mapTransactionFee(p.transaction),
         })),
       // Paging straight off Horizon is out of scope, so this path is the last page.
       nextCursor: null,

@@ -37,7 +37,7 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
           payments: () => ({
             forAccount: () => ({
               limit: () => ({
-                order: () => ({ call: paymentsCallMock }),
+                order: () => ({ join: () => ({ call: paymentsCallMock }) }),
               }),
             }),
           }),
@@ -570,6 +570,9 @@ describe("getTransactions", () => {
         asset_code: "XLM",
         transaction_hash: "h1",
         created_at: "2026-01-01T00:00:00Z",
+        fee_charged: null,
+        operation_count: null,
+        fee_bumped: false,
       },
     ];
     const page = { records, nextCursor: "cursor-1" };
@@ -613,6 +616,9 @@ describe("getTransactions", () => {
           asset_code: "XLM",
           transaction_hash: "h1",
           created_at: "2026-01-01T00:00:00Z",
+          fee_charged: null,
+          operation_count: null,
+          fee_bumped: false,
         },
       ],
       // Paging straight off Horizon is out of scope, so this path ends here.
