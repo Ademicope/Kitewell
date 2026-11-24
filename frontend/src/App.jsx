@@ -49,6 +49,7 @@ import {
   statusWatchHref,
   getAccountAuthConfig,
   getIssuedAssetTrustlines,
+  accountLedgerStatus,
   IMMUTABLE_CONFIRMATION,
 } from "./stellar";
 import {
@@ -59,7 +60,7 @@ import {
 } from "./orderBookPair";
 import { poolShareRows } from "./poolShare";
 import { validatePaymentAmount } from "./validatePaymentAmount";
-import { fetchHealth, fetchNetworkInfo } from "./api";
+import { fetchHealth, fetchLatestHorizonLedger, fetchNetworkInfo } from "./api";
 import { decodeEnvelope, formatArgumentValue } from "./envelopeDecoder";
 import { formatSimulationFee } from "./simulationFees";
 import {
@@ -519,7 +520,16 @@ export default function App() {
       setClaimableBalances(claimables);
       try {
         const details = await getAccountDetails(publicKey, { signal });
-        setAccountDetails(details);
+        const latestLedger = await fetchLatestHorizonLedger(
+          activeNetwork.horizonUrl
+        ).catch(() => null);
+        setAccountDetails({
+          ...details,
+          ledgerStatus: accountLedgerStatus(
+            details.lastModifiedLedger,
+            latestLedger
+          ),
+        });
       } catch (detailsError) {
         if (detailsError?.name === "AbortError") return;
         if (isHorizonSlowdownError(detailsError)) {
@@ -542,7 +552,7 @@ export default function App() {
     } finally {
       setLoading("");
     }
-  }, [publicKey]);
+  }, [activeNetwork, publicKey]);
 
   const handleClawback = async (balance) => {
     if (!publicKey) return showToast("Connect Freighter first.", "error");
@@ -1886,6 +1896,18 @@ export default function App() {
                           <span className="metadata-value">{accountDetails.subentryCount}</span>
                         </div>
                         <div>
+                          <span className="metadata-label">Last modified ledger</span>
+                          <span className="metadata-value">
+                            {accountDetails.ledgerStatus?.lastModifiedLedger ?? "Unknown"}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Latest Horizon ledger</span>
+                          <span className="metadata-value">
+                            {accountDetails.ledgerStatus?.latestLedger ?? "Unknown"}
+                          </span>
+                        </div>
+                        <div>
                           <span className="metadata-label">Thresholds</span>
                           <span className="metadata-value">
                             {accountDetails.thresholds?.low_threshold ?? "—"},{" "}
@@ -1894,6 +1916,9 @@ export default function App() {
                           </span>
                         </div>
                       </div>
+                      <p className="muted" role="status" style={{ marginTop: 8 }}>
+                        {accountDetails.ledgerStatus?.message ?? "Ledger age unknown."}
+                      </p>
                       <a
                         href={explorerAccountUrl(publicKey)}
                         className="text-link"

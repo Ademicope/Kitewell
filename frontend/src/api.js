@@ -12,6 +12,16 @@ export async function fetchHealth() {
   return res.json();
 }
 
+/** Read the latest ledger sequence directly from the selected Horizon. */
+export async function fetchLatestHorizonLedger(horizonUrl) {
+  const base = String(horizonUrl || "").replace(/\/$/, "");
+  const res = await fetch(`${base}/ledgers?order=desc&limit=1`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error("Latest Horizon ledger fetch failed");
+  const sequence = data?._embedded?.records?.[0]?.sequence;
+  return sequence == null ? null : Number(sequence);
+}
+
 export async function fetchAccountViaApi(publicKey) {
   const res = await fetch(`${API_BASE}/api/account/${publicKey}`);
   const data = await res.json().catch(() => ({}));
