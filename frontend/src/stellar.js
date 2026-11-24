@@ -1,6 +1,7 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { fetchAccountViaApi, fetchPaymentsViaApi } from "./api";
 import { normaliseTxHash } from "./txStatusWatch";
+import { rowsToCsv } from "./csvExport";
 import {
   getActiveNetwork,
   getActiveNetworkId,
@@ -714,6 +715,77 @@ export async function getTransactionByHash(input, options = {}) {
     const operationPage = await read(`${base}/transactions/${hash}/operations?limit=200`);
     return { transaction, operations: operationPage?._embedded?.records || [] };
   }, options);
+}
+
+const MEMO_LOOKUP_CONCURRENCY = 5;
+
+/**
+ * Read the memo of each distinct transaction hash straight from Horizon.
+ * Payment records carry no memo, so the CSV export looks them up here.
+ *
+ * @param {string[]} hashes Transaction hashes, duplicates allowed.
+ * @param {object} [options] Forwarded to the Horizon read (`signal`, `sleep`).
+ * @returns {Promise<Map<string, string>>} Memo by hash; "" when a transaction has none.
+ */
+export async function getTransactionMemos(hashes, options = {}) {
+  const unique = [...new Set(hashes)];
+  const base = getActiveNetwork().horizonUrl;
+  const memos = new Map();
+
+  const lookup = async (hash) => {
+    const transaction = await withHorizon429Backoff(async () => {
+      const response = await fetch(`${base}/transactions/${hash}`, { signal: options.signal });
+      if (!response.ok) {
+        const error = new Error(`Could not load transaction (HTTP ${response.status}).`);
+        error.status = response.status;
+        throw error;
+      }
+      return response.json();
+    }, options);
+    memos.set(hash, transaction?.memo ?? "");
+  };
+
+  for (let i = 0; i < unique.length; i += MEMO_LOOKUP_CONCURRENCY) {
+    await Promise.all(unique.slice(i, i + MEMO_LOOKUP_CONCURRENCY).map(lookup));
+  }
+  return memos;
+}
+
+export const PAYMENTS_CSV_COLUMNS = [
+  "time",
+  "direction",
+  "asset",
+  "amount",
+  "other_account",
+  "memo",
+  "hash",
+];
+
+export const PAYMENTS_CSV_FILENAME = "kitewell-payments.csv";
+
+/**
+ * Build the CSV for the payments currently loaded in the history list.
+ * An empty list yields the header row only.
+ *
+ * @param {object[]} payments Loaded payment records.
+ * @param {string} publicKey Connected account; decides direction and other account.
+ * @param {Map<string, string>} [memosByHash] Memo per transaction hash.
+ * @returns {string} CRLF-terminated CSV text.
+ */
+export function buildPaymentsCsv(payments, publicKey, memosByHash = new Map()) {
+  const rows = payments.map((payment) => {
+    const isOutgoing = payment.from === publicKey;
+    return {
+      time: payment.created_at ?? "",
+      direction: isOutgoing ? "sent" : "received",
+      asset: payment.asset_code || "XLM",
+      amount: payment.amount,
+      other_account: isOutgoing ? payment.to : payment.from,
+      memo: memosByHash.get(payment.transaction_hash) ?? "",
+      hash: payment.transaction_hash,
+    };
+  });
+  return rowsToCsv(rows, PAYMENTS_CSV_COLUMNS);
 }
 
 /** Deep-link into the hash status watch panel for a transaction. */
