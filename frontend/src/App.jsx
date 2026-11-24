@@ -56,9 +56,11 @@ import {
   getIssuedAssetTrustlines,
   accountLedgerStatus,
   IMMUTABLE_CONFIRMATION,
-  watchOfferUntilGone,
+  getTransactionMemos,
+  buildPaymentsCsv,
+  PAYMENTS_CSV_FILENAME,
 } from "./stellar";
-import { formatHistoryFee } from "./historyFee";
+import { downloadCsv } from "./csvExport";
 import {
   clearStoredOrderBookPair,
   parseOrderBookPair,
@@ -1975,6 +1977,36 @@ export default function App() {
       trustlineCheckError = error.message;
     }
   }
+
+  // Exports only the payments loaded in the list; the CSV is built in the browser.
+  const handleExportPayments = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading("history-export");
+    const signal = beginHorizonRead();
+    try {
+      const memos = await getTransactionMemos(
+        visibleTransactions.map((tx) => tx.transaction_hash),
+        { signal }
+      );
+      downloadCsv(buildPaymentsCsv(visibleTransactions, publicKey, memos), PAYMENTS_CSV_FILENAME);
+      showToast(
+        visibleTransactions.length === 0
+          ? "The payment list was empty, so the CSV has a header row only."
+          : `Downloaded ${visibleTransactions.length} payments as CSV.`,
+        visibleTransactions.length === 0 ? "info" : "success"
+      );
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      showToast(
+        isHorizonSlowdownError(error)
+          ? HORIZON_SLOWDOWN_MESSAGE
+          : "Could not read payment memos, so nothing was downloaded.",
+        "error"
+      );
+    } finally {
+      setLoading("");
+    }
+  };
 
   const loadLabInfo = async () => {
     setLoading("lab");
@@ -6218,20 +6250,36 @@ export default function App() {
             <div className="section">
               <div className="section__row">
                 <h2>Payment history</h2>
-                <button
-                  className="btn btn--secondary"
-                  type="button"
-                  onClick={handleHistory}
-                  disabled={loading === "history" || requireWallet}
-                >
-                  {loading === "history" ? (
-                    <>
-                      <Spinner /> Loading…
-                    </>
-                  ) : (
-                    "Refresh"
-                  )}
-                </button>
+                <div className="section__actions">
+                  <button
+                    className="btn btn--secondary"
+                    type="button"
+                    onClick={handleHistory}
+                    disabled={loading === "history" || requireWallet}
+                  >
+                    {loading === "history" ? (
+                      <>
+                        <Spinner /> Loading…
+                      </>
+                    ) : (
+                      "Refresh"
+                    )}
+                  </button>
+                  <button
+                    className="btn btn--secondary"
+                    type="button"
+                    onClick={handleExportPayments}
+                    disabled={loading === "history-export" || requireWallet}
+                  >
+                    {loading === "history-export" ? (
+                      <>
+                        <Spinner /> Exporting…
+                      </>
+                    ) : (
+                      "Download CSV"
+                    )}
+                  </button>
+                </div>
               </div>
               <p className="muted" aria-live="polite">
                 {streamStatusLabel(streamState)}

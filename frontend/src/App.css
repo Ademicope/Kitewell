@@ -373,6 +373,12 @@ body {
   justify-content: space-between;
   gap: 12px;
 }
+.section__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .section h2 {
   font-family: var(--display);
   font-size: 1.15rem;
