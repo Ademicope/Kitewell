@@ -10,6 +10,7 @@ import {
   changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
   manageDataWithFreighter,
+  mergeAccountWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
   readAdminState,
@@ -220,6 +221,10 @@ export default function App() {
   const horizonAbortRef = useRef(null);
   const [accountDetails, setAccountDetails] = useState(null);
   const [dataForm, setDataForm] = useState({ name: "", value: "" });
+  const [mergeForm, setMergeForm] = useState({
+    destination: "",
+    retypeDestination: "",
+  });
   const [failedSubmits, setFailedSubmits] = useState([]);
   const failedSubmitLogRef = useRef(createFailedSubmitLog());
   const [webAuthForm, setWebAuthForm] = useState({ endpoint: "", serverAccount: "" });
@@ -602,6 +607,73 @@ export default function App() {
     }
   };
 
+  const refreshAccountDetails = async () => {
+    if (!publicKey) return;
+    try {
+      setAccountDetails(await getAccountDetails(publicKey));
+    } catch {
+      setAccountDetails(null);
+    }
+  };
+
+  const handleSetData = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!dataForm.name) return showToast("Data name is required.", "error");
+    setLoading("data-set");
+    try {
+      await manageDataWithFreighter(publicKey, dataForm.name, dataForm.value);
+      setDataForm({ name: "", value: "" });
+      await refreshAccountDetails();
+      showToast("Account data submitted.");
+    } catch (err) {
+      showToast(err.message || "Could not set account data.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleClearData = async (name) => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading(`data-clear-${name}`);
+    try {
+      await manageDataWithFreighter(publicKey, name, null);
+      await refreshAccountDetails();
+      showToast(`Cleared account data "${name}".`);
+    } catch (err) {
+      showToast(err.message || `Could not clear "${name}".`, "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleMergeAccount = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading("merge");
+    try {
+      const result = await mergeAccountWithFreighter(
+        publicKey,
+        mergeForm.destination,
+        mergeForm.retypeDestination
+      );
+      showToast(
+        `Account merge submitted · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      setPublicKey(null);
+      setBalances([]);
+      setTransactions([]);
+      setAccountDetails(null);
+      setMergeForm({ destination: "", retypeDestination: "" });
+    } catch (err) {
+      showToast(err.message || "Account merge failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
   const handleConnect = async () => {
     setLoading("connect");
     try {
@@ -614,9 +686,6 @@ export default function App() {
       setOfferResult(null);
       setClaimableBalances([]);
       setTransactions([]);
-      setAccountDetails(null);
-      setReserveSubentryCount("0");
-      await refreshReserve();
       showToast("Freighter connected.");
       try {
         const next = await getAccountBalances(address);
@@ -2678,6 +2747,59 @@ export default function App() {
                       </form>
                     </div>
                   )}
+                  <div className="info-box info-box--warning">
+                    <span className="eyebrow">Merge connected account</span>
+                    <p className="muted">
+                      This irreversibly removes the connected account and sends its entire
+                      XLM balance to the destination account. Trustlines, open offers, and
+                      extra signers must be removed first.
+                    </p>
+                    <form className="form data-form" onSubmit={handleMergeAccount}>
+                      <label className="label" htmlFor="merge-destination">
+                        Destination public key
+                      </label>
+                      <input
+                        id="merge-destination"
+                        className="input"
+                        value={mergeForm.destination}
+                        onChange={(e) =>
+                          setMergeForm((prev) => ({
+                            ...prev,
+                            destination: e.target.value,
+                          }))
+                        }
+                        placeholder="G..."
+                      />
+                      <label className="label" htmlFor="merge-retype">
+                        Retype destination public key
+                      </label>
+                      <input
+                        id="merge-retype"
+                        className="input"
+                        value={mergeForm.retypeDestination}
+                        onChange={(e) =>
+                          setMergeForm((prev) => ({
+                            ...prev,
+                            retypeDestination: e.target.value,
+                          }))
+                        }
+                        placeholder="Type the destination again"
+                      />
+                      <button
+                        className="btn btn--primary"
+                        type="submit"
+                        disabled={loading === "merge"}
+                      >
+                        {loading === "merge" ? (
+                          <>
+                            <Spinner /> Checking merge…
+                          </>
+                        ) : (
+                          "Merge account"
+                        )}
+                      </button>
+                    </form>
+                  </div>
                   <button className="btn btn--secondary" type="button" onClick={handleDisconnect}>
                     Disconnect
                   </button>

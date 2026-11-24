@@ -69,6 +69,7 @@ const {
   readKitewellState,
   registerBuilderWithFreighter,
   manageDataWithFreighter,
+  mergeAccountWithFreighter,
 } = await import("./freighter");
 
 const CONTRACT_ID =
@@ -286,6 +287,46 @@ describe("readKitewellState", () => {
       "valid Soroban contract"
     );
     expect(sorobanServerMock.simulateTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("mergeAccountWithFreighter", () => {
+  it("does not call Freighter for a mismatched retype", async () => {
+    const destination = StellarSdk.Keypair.random().publicKey();
+
+    await expect(
+      mergeAccountWithFreighter(USER, destination, "GWRONG")
+    ).rejects.toThrow("Retype the destination");
+    expect(signTransactionMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses merging an account into itself before loading or signing", async () => {
+    await expect(
+      mergeAccountWithFreighter(USER, USER, USER)
+    ).rejects.toThrow("cannot be the connected account");
+    expect(horizonLoadAccountMock).not.toHaveBeenCalled();
+    expect(signTransactionMock).not.toHaveBeenCalled();
+  });
+
+  it("builds an account merge operation body", async () => {
+    const destination = StellarSdk.Keypair.random().publicKey();
+    horizonLoadAccountMock.mockResolvedValue(new StellarSdk.Account(USER, "7"));
+    signTransactionMock.mockResolvedValue({
+      signedTxXdr: null,
+      error: { message: "stop after building" },
+    });
+
+    await expect(
+      mergeAccountWithFreighter(USER, destination, destination)
+    ).rejects.toThrow("stop after building");
+
+    const unsignedXdr = signTransactionMock.mock.calls[0][0];
+    const transaction = StellarSdk.TransactionBuilder.fromXDR(
+      unsignedXdr,
+      StellarSdk.Networks.TESTNET
+    );
+    expect(transaction.operations[0].type).toBe("accountMerge");
+    expect(transaction.operations[0].destination).toBe(destination);
   });
 });
 

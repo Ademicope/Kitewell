@@ -17,6 +17,8 @@ import {
   MAX_ASSET_CODE_LENGTH,
   validateDataName,
   validateDataValue,
+  validateAccountMerge,
+  getAccountMergeBlockers,
 } from "./stellar";
 import { parseHorizonError } from "./horizonErrorParse";
 import { formatTrustlineLimit } from "./trustlineLimitFormat";
@@ -1061,19 +1063,16 @@ export async function changeTrustWithFreighter(
 
 /**
  * Set or clear one account data entry.
- * Passing null clears the name; otherwise value is UTF-8.
  */
 export async function manageDataWithFreighter(publicKey, name, value = null) {
   if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
     throw new Error("Connect a valid Freighter address first.");
   }
-
   const normalizedName = validateDataName(name);
   const normalizedValue =
     value === null || value === undefined
       ? null
       : Buffer.from(validateDataValue(value), "utf8");
-
   const sourceAccount = await getServer().loadAccount(publicKey);
   const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: StellarSdk.BASE_FEE,
@@ -1087,7 +1086,6 @@ export async function manageDataWithFreighter(publicKey, name, value = null) {
     )
     .setTimeout(180)
     .build();
-
   return signAndSubmit(transaction, publicKey);
 }
 
@@ -1100,6 +1098,105 @@ export async function clearAccountDataWithFreighter(publicKey, name) {
 }
 
 export const manageDataEntryWithFreighter = manageDataWithFreighter;
+
+/**
+ * Merge the connected account into a destination account.
+ */
+export async function mergeAccountWithFreighter(
+  publicKey,
+  destination,
+  retypeDestination
+) {
+  validateAccountMerge(publicKey, destination, retypeDestination);
+  const blockers = await getAccountMergeBlockers(publicKey);
+  if (blockers.length) {
+    throw new Error(
+      `Account cannot be merged. Remove these blockers first: ${blockers.join("; ")}`
+    );
+  }
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(StellarSdk.Operation.accountMerge({ destination }))
+    .setTimeout(180)
+    .build();
+  return signAndSubmit(transaction, publicKey);
+}
+
+export const mergeAccount = mergeAccountWithFreighter;
+export const accountMergeWithFreighter = mergeAccountWithFreighter;
+
+/**
+ * Update an issuer's home domain and/or auth flags with `setOptions`, signed by
+ * the connected account. Validation (including the immutable confirmation
+ * gate) lives in `buildSetOptionsBody`, so an unsafe combination never reaches
+ * Freighter.
+ */
+export async function setAccountOptionsWithFreighter(publicKey, options = {}) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+
+  const body = buildSetOptionsBody(options);
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(StellarSdk.Operation.setOptions(body))
+    .setTimeout(180)
+    .build();
+
+  return signAndSubmit(transaction, publicKey);
+}
+
+/**
+ * Authorize or revoke one holder's trustline with `allowTrust`.
+ *
+ * The asset issuer is the source account of an allowTrust op, so the connected
+ * account must match `assetIssuer`; otherwise we would be trying to control an
+ * asset somebody else issued.
+ */
+export async function allowTrustWithFreighter(
+  publicKey,
+  { holder, assetCode, assetIssuer, authorize } = {}
+) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
+  }
+  if (assetIssuer !== publicKey) {
+    throw new Error("Only the issuer can authorize or revoke this asset.");
+  }
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(holder)) {
+    throw new Error("Holder must be a valid Stellar public key (G…).");
+  }
+
+  const code = (assetCode || "").trim().toUpperCase();
+  if (!code || code.length > MAX_ASSET_CODE_LENGTH) {
+    throw new Error(`Asset code must be 1–${MAX_ASSET_CODE_LENGTH} characters.`);
+  }
+
+  const sourceAccount = await getServer().loadAccount(publicKey);
+  const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: currentPassphrase(),
+  })
+    .addOperation(
+      StellarSdk.Operation.allowTrust({
+        trustor: holder,
+        assetCode: code,
+        authorize: Boolean(authorize),
+      })
+    )
+    .setTimeout(180)
+    .build();
+
+  // Deliberately do not pre-check the holder's balance: if a revoke is invalid
+  // (e.g. the trustline still holds a balance), Horizon's error is surfaced.
+  return signAndSubmit(transaction, publicKey);
+}
 
 /**
  * Update an issuer's home domain and/or auth flags with `setOptions`, signed by
@@ -1223,23 +1320,4 @@ export async function preparePaymentWithFreighter(
       fee: fee.toString(),
     },
   };
-}
-
-export async function confirmPaymentWithFreighter(prepared, publicKey) {
-  if (!prepared?.transaction) {
-    throw new Error("Confirm a prepared payment transaction first.");
-  }
-
-  if (!publicKey) {
-    throw new Error("A connected Stellar account is required.");
-  }
-
-  // Sign the exact transaction shown in the payment review.
-  const signedTx = await signWithFreighter(
-    prepared.transaction.toXDR(),
-    publicKey
-  );
-
-  // Submit only after explicit user confirmation and signing.
-  return getServer().submitTransaction(signedTx);
 }
