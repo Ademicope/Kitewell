@@ -1938,3 +1938,10 @@ export async function extendCodeTTL(publicKey, wasmHash, extendTo, currentLedger
 
   return { hash: result.hash, deadline: extendTo };
 }
+
+export {
+  inspectMultisigEnvelope,
+  mergeEnvelopeSignatures,
+  addSignatureToEnvelopeWithFreighter,
+  submitMultisigEnvelope,
+} from "./multisigEnvelope";

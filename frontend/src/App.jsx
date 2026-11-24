@@ -95,6 +95,7 @@ import { fetchPathQuote, formatPathHops } from "./paths";
 import { decodeTransactionEnvelope } from "./txInspector";
 import TransactionHashLookup from "./TransactionHashLookup";
 import SigningPassphraseConfirmation from "./SigningPassphraseConfirmation";
+import MultisigCosignPanel from "./MultisigCosignPanel";
 import { completeWebAuthChallenge } from "./sep10WebAuth";
 import { loadIssuerCurrencyList } from "./issuerToml";
 import { createPaymentStreamController } from "./paymentStream";
@@ -6003,6 +6004,7 @@ export default function App() {
                   </div>
                 )}
               </div>
+              <MultisigCosignPanel publicKey={publicKey} onToast={showToast} />
               {!labInfo && !labError && (
                 <p className="muted">Open this tab to probe the backend.</p>
               )}
