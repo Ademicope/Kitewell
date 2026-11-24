@@ -1012,190 +1012,53 @@ export function mapPendingTransaction(record) {
 }
 
 /**
- * Fetch and parse stellar.toml for a domain or issuer account.
+ * Load one page of trades for an account.
  *
- * @param {string} domainOrIssuer Either a domain (e.g., "example.com") or a
- *   Stellar public key (G...). When an issuer is provided, the SDK resolves
- *   the home_domain from the account's on-chain data.
- * @returns {Promise<object>} Parsed stellar.toml with keys like
- *   TRANSFER_SERVER, WEB_AUTH_ENDPOINT, KYC_SERVER, CURRENCIES, etc.
+ * @param {string} publicKey Account to page through.
+ * @param {number} [limit] Page size; Horizon caps it at 200 server-side.
+ * @param {string} [cursor] Paging cursor from the previous page; omit for the
+ *   first page.
+ * @returns {Promise<{ records: object[], nextCursor: string|null }>} The
+ *   mapped trade records plus the cursor for the next page (null on the last
+ *   page).
  */
-export async function fetchStellarToml(domainOrIssuer) {
-  if (!domainOrIssuer || typeof domainOrIssuer !== "string") {
-    throw new Error("Domain or issuer address is required.");
-  }
-
-  const trimmed = domainOrIssuer.trim();
-  if (!trimmed) {
-    throw new Error("Domain or issuer address is required.");
-  }
-
-  return StellarSdk.StellarTomlResolver.resolve(trimmed, {
-    allowHttp: false,
-  });
-}
-
-/**
- * Fetch the SEP-24 info endpoint from a transfer server URL.
- *
- * @param {string} transferServerUrl The TRANSFER_SERVER URL from stellar.toml.
- * @returns {Promise<object>} The parsed JSON response from the /info endpoint,
- *   including deposit and withdraw asset details.
- */
-export async function fetchTransferServerInfo(transferServerUrl) {
-  if (!transferServerUrl || typeof transferServerUrl !== "string") {
-    throw new Error("Transfer server URL is required.");
-  }
-
-  const trimmed = transferServerUrl.trim();
-  if (!trimmed) {
-    throw new Error("Transfer server URL is required.");
-  }
-
-  // Only allow HTTPS URLs for security
-  if (!trimmed.startsWith("https://")) {
-    throw new Error("Transfer server URL must use HTTPS.");
-  }
-
-  // Build info endpoint URL, ensuring no double slashes
-  const baseUrl = trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
-  const infoUrl = `${baseUrl}/info`;
-
-  const response = await fetch(infoUrl);
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch transfer server info: ${response.status} ${response.statusText}`
-    );
-  }
-
-  return response.json();
-}
-
-/**
- * Fetch stellar.toml and optionally the transfer server info for a domain or issuer.
- *
- * @param {string} domainOrIssuer Either a domain (e.g., "example.com") or a
- *   Stellar public key (G...).
- * @returns {Promise<object>} An object with:
- *   - toml: The parsed stellar.toml
- *   - transferServerInfo: The parsed /info response (null if TRANSFER_SERVER
- *     is absent or the fetch fails)
- */
-export async function fetchAnchorInfo(domainOrIssuer) {
-  const toml = await fetchStellarToml(domainOrIssuer);
-
-  let transferServerInfo = null;
-  if (toml.TRANSFER_SERVER) {
-    try {
-      transferServerInfo = await fetchTransferServerInfo(toml.TRANSFER_SERVER);
-    } catch {
-      // If the info endpoint fails, we still return the toml data
-      transferServerInfo = null;
-    }
-  }
-
-  return {
-    toml,
-    transferServerInfo,
-  };
-}
-
-/**
- * Fetch a complete account snapshot from Horizon.
- *
- * @param {string} publicKey The account to snapshot.
- * @returns {Promise<object>} A comprehensive account snapshot including id,
- *   sequence, balances, signers, thresholds, data entries, offers, and
- *   subentry count. Secrets and signed XDR are never included.
- */
-export async function getAccountSnapshot(publicKey) {
+export async function getTrades(publicKey, limit = 15, cursor) {
   if (!publicKey || typeof publicKey !== "string") {
     throw new Error("Public key is required.");
   }
 
-  const account = await getServer().loadAccount(publicKey);
+  let builder = getServer()
+    .trades()
+    .forAccount(publicKey)
+    .limit(limit)
+    .order("desc");
 
-  // Fetch offers for this account
-  let offers = [];
-  try {
-    const offersResponse = await getServer()
-      .offers()
-      .forAccount(publicKey)
-      .limit(200)
-      .call();
-    offers = offersResponse.records.map((offer) => ({
-      id: offer.id,
-      selling: offer.selling,
-      buying: offer.buying,
-      amount: offer.amount,
-      price: offer.price,
-      price_r: offer.price_r,
-    }));
-  } catch {
-    // Offers are optional; if fetch fails, continue with empty array
-    offers = [];
+  if (cursor) {
+    builder = builder.cursor(cursor);
   }
 
-  // Process data entries, converting non-UTF-8 values to hex
-  const dataEntries = {};
-  if (account.data_attr) {
-    Object.entries(account.data_attr).forEach(([key, value]) => {
-      try {
-        // Try to decode as UTF-8
-        const decoded = Buffer.from(value, "base64").toString("utf8");
-        // Check if it round-trips correctly (is valid UTF-8)
-        if (Buffer.from(decoded, "utf8").toString("base64") === value) {
-          dataEntries[key] = decoded;
-        } else {
-          // Not valid UTF-8, store as hex
-          dataEntries[key] = Buffer.from(value, "base64").toString("hex");
-        }
-      } catch {
-        // If decoding fails, store as hex
-        dataEntries[key] = Buffer.from(value, "base64").toString("hex");
-      }
-    });
-  }
+  const response = await builder.call();
 
   return {
-    id: account.id,
-    sequence: account.sequenceNumber(),
-    subentryCount: account.subentry_count,
-    thresholds: {
-      low: account.thresholds.low_threshold,
-      medium: account.thresholds.med_threshold,
-      high: account.thresholds.high_threshold,
-    },
-    signers: account.signers.map((signer) => ({
-      key: signer.key,
-      weight: signer.weight,
-      type: signer.type,
+    records: response.records.map((trade) => ({
+      id: trade.id,
+      ledger_close_time: trade.ledger_close_time,
+      offer_id: trade.offer_id,
+      base_account: trade.base_account,
+      base_amount: trade.base_amount,
+      base_asset_type: trade.base_asset_type,
+      base_asset_code: trade.base_asset_code,
+      base_asset_issuer: trade.base_asset_issuer,
+      counter_account: trade.counter_account,
+      counter_amount: trade.counter_amount,
+      counter_asset_type: trade.counter_asset_type,
+      counter_asset_code: trade.counter_asset_code,
+      counter_asset_issuer: trade.counter_asset_issuer,
+      price: trade.price,
+      base_is_seller: trade.base_is_seller,
     })),
-    balances: mapHorizonBalances(account),
-    data: dataEntries,
-    offers,
-    network: getActiveNetworkId(),
-    exportedAt: new Date().toISOString(),
+    nextCursor: response.records.length > 0 
+      ? response.records[response.records.length - 1].paging_token 
+      : null,
   };
-}
-
-/**
- * Download an account snapshot as a JSON file.
- *
- * @param {string} publicKey The account to snapshot.
- */
-export async function downloadAccountSnapshot(publicKey) {
-  const snapshot = await getAccountSnapshot(publicKey);
-
-  const filename = `kitewell-account-${snapshot.id.slice(0, 8)}-${Date.now()}.json`;
-  const json = JSON.stringify(snapshot, null, 2);
-  const blob = new Blob([json], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.click();
-
-  URL.revokeObjectURL(url);
 }
