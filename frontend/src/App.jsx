@@ -53,6 +53,7 @@ import {
 } from "./network";
 import { validateAssetCode } from "./validateAssetCode";
 import { decodeTransactionEnvelope } from "./txInspector";
+import TransactionHashLookup from "./TransactionHashLookup";
 import { completeWebAuthChallenge } from "./sep10WebAuth";
 import { loadIssuerCurrencyList } from "./issuerToml";
 import { createPaymentStreamController } from "./paymentStream";
@@ -2473,6 +2474,7 @@ export default function App() {
                   operation will appear here.
                 </p>
               )}
+              <TransactionHashLookup key={networkId} />
             </div>
           )}
 

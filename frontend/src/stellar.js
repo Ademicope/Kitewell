@@ -1,5 +1,6 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { fetchAccountViaApi, fetchPaymentsViaApi } from "./api";
+import { normaliseTxHash } from "./txStatusWatch";
 import {
   getActiveNetwork,
   getActiveNetworkId,
@@ -604,6 +605,31 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
       // Paging straight off Horizon is out of scope, so this path is the last page.
       nextCursor: null,
     };
+  }, options);
+}
+
+/** Read one transaction and all its operations directly from the active Horizon. */
+export async function getTransactionByHash(input, options = {}) {
+  const hash = normaliseTxHash(input);
+  const base = getActiveNetwork().horizonUrl;
+
+  const read = async (url) => {
+    const response = await fetch(url, { signal: options.signal });
+    if (response.status === 404) {
+      throw new Error("Transaction not found on this network.");
+    }
+    if (!response.ok) {
+      const error = new Error(`Could not load transaction (HTTP ${response.status}).`);
+      error.status = response.status;
+      throw error;
+    }
+    return response.json();
+  };
+
+  return withHorizon429Backoff(async () => {
+    const transaction = await read(`${base}/transactions/${hash}`);
+    const operationPage = await read(`${base}/transactions/${hash}/operations?limit=200`);
+    return { transaction, operations: operationPage?._embedded?.records || [] };
   }, options);
 }
 
