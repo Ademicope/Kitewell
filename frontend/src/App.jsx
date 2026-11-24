@@ -9,7 +9,8 @@ import {
   pathPaymentWithFreighter,
   changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
-  createAccountWithFreighter,
+  createClaimableBalanceWithFreighter,
+  claimClaimableBalanceWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
   readAdminState,
@@ -43,7 +44,7 @@ import {
   getLiquidityPool,
   getLatestBaseReserve,
   getTransactions,
-  formatDataValue,
+  getClaimableBalances,
   explorerAccountUrl,
   explorerTxUrl,
   resolveFederationAddress,
@@ -86,8 +87,7 @@ const TABS = [
   "Issuer",
   "Send",
   "Path",
-  "Offer",
-  "Book",
+  "Claimable",
   "History",
   "Fees",
   "Pending",
@@ -219,11 +219,15 @@ export default function App() {
   const tabRefs = useRef([]);
   const horizonAbortRef = useRef(null);
   const [accountDetails, setAccountDetails] = useState(null);
-  const [createAccountForm, setCreateAccountForm] = useState({
-    destination: "",
-    startingBalance: "1",
+  const [claimableForm, setClaimableForm] = useState({
+    claimant: "",
+    amount: "",
+    assetKey: "native",
+    predicateMode: "unconditional",
+    ledgerTime: "",
   });
-  const [createAccountResult, setCreateAccountResult] = useState(null);
+  const [claimableBalances, setClaimableBalances] = useState([]);
+  const [claimableResult, setClaimableResult] = useState(null);
   const [failedSubmits, setFailedSubmits] = useState([]);
   const failedSubmitLogRef = useRef(createFailedSubmitLog());
   const [webAuthForm, setWebAuthForm] = useState({ endpoint: "", serverAccount: "" });
@@ -668,6 +672,100 @@ export default function App() {
       setMergeForm({ destination: "", retypeDestination: "" });
     } catch (err) {
       showToast(err.message || "Account merge failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleClaimableRefresh = useCallback(async () => {
+    if (!publicKey) return;
+    setLoading("claimable-list");
+    try {
+      setClaimableBalances(await getClaimableBalances(publicKey));
+    } catch (err) {
+      setClaimableBalances([]);
+      showToast(err.message || "Could not load claimable balances.", "error");
+    } finally {
+      setLoading("");
+    }
+  }, [publicKey]);
+
+  const handleCreateClaimable = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!claimableForm.claimant) {
+      return showToast("Claimant is required.", "error");
+    }
+    const selected = balances.find((b) => b.key === claimableForm.assetKey);
+    if (!selected) return showToast("Choose an asset you hold.", "error");
+    if (parseFloat(claimableForm.amount) > parseFloat(selected.balance)) {
+      return showToast(
+        `Insufficient ${selected.code} balance. Available: ${selected.balance}.`,
+        "error"
+      );
+    }
+    setLoading("claimable-create");
+    setClaimableResult(null);
+    try {
+      const asset = selected.isNative
+        ? { isNative: true }
+        : { isNative: false, code: selected.code, issuer: selected.issuer };
+      const result = await createClaimableBalanceWithFreighter({
+        publicKey,
+        claimant: claimableForm.claimant,
+        amount: claimableForm.amount,
+        asset,
+        predicateMode: claimableForm.predicateMode,
+        ledgerTime: claimableForm.ledgerTime,
+      });
+      setClaimableResult({ type: "created", hash: result.hash });
+      setClaimableForm({
+        claimant: "",
+        amount: "",
+        assetKey: "native",
+        predicateMode: "unconditional",
+        ledgerTime: "",
+      });
+      try {
+        setBalances(await getAccountBalances(publicKey));
+      } catch {
+        /* balances refresh separately */
+      }
+      showToast(
+        `Claimable balance created · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+    } catch (err) {
+      showToast(err.message || "Could not create claimable balance.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleClaimClaimable = async (balance) => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading(`claimable-${balance.id}`);
+    try {
+      const result = await claimClaimableBalanceWithFreighter(publicKey, balance.id);
+      setClaimableResult({
+        type: "claimed",
+        hash: result.hash,
+        balanceId: balance.id,
+      });
+      await handleClaimableRefresh();
+      try {
+        setBalances(await getAccountBalances(publicKey));
+      } catch {
+        /* balances refresh separately */
+      }
+      showToast(
+        `Claimable balance claimed · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+    } catch (err) {
+      showToast(err.message || "Could not claim balance.", "error");
     } finally {
       setLoading("");
     }
@@ -2328,6 +2426,7 @@ export default function App() {
     setActiveTab(tab);
     if (tab === "Fees") loadFeeStats();
     if (tab === "History") handleHistory();
+    if (tab === "Claimable" && publicKey) handleClaimableRefresh();
     if (tab === "Lab") {
       loadLabInfo();
       checkRpc();
@@ -5012,70 +5111,168 @@ export default function App() {
             </div>
           )}
 
-          {activeTab === "Issue" && (
+          {activeTab === "Claimable" && (
             <div className="section">
               <div className="section__row">
-                <h2>Issue Credit Asset</h2>
-                <p className="muted">
-                  Send a new credit asset from your issuer account to a holder.
-                </p>
+                <h2>Claimable balances</h2>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  onClick={handleClaimableRefresh}
+                  disabled={loading === "claimable-list" || requireWallet}
+                >
+                  {loading === "claimable-list" ? (
+                    <><Spinner /> Loading…</>
+                  ) : (
+                    "Refresh"
+                  )}
+                </button>
               </div>
-              {publicKey ? (
-                <form className="form" onSubmit={handleIssue}>
-                  <label className="label" htmlFor="issue-asset-code">
-                    Asset code
-                  </label>
-                  <input
-                    id="issue-asset-code"
-                    className="input"
-                    value={issueForm.code}
-                    onChange={(e) =>
-                      setIssueForm({ ...issueForm, code: e.target.value })
-                    }
-                    placeholder="e.g. MYASSET"
-                    maxLength={12}
-                    required
-                  />
-                  <label className="label" htmlFor="issue-destination">
-                    Holder account
-                  </label>
-                  <input
-                    id="issue-destination"
-                    className="input"
-                    type="text"
-                    placeholder="G…"
-                    value={issueForm.destination}
-                    onChange={(e) =>
-                      setIssueForm({ ...issueForm, destination: e.target.value })
-                    }
-                    required
-                  />
-                  <label className="label" htmlFor="issue-amount">
-                    Amount to issue
-                  </label>
-                  <input
-                    id="issue-amount"
-                    className="input"
-                    type="number"
-                    min="0.0000001"
-                    step="0.0000001"
-                    placeholder="e.g. 1000000"
-                    value={issueForm.amount}
-                    onChange={(e) =>
-                      setIssueForm({ ...issueForm, amount: e.target.value })
-                    }
-                    required
-                  />
-                  <p className="muted">
-                    The holder must already have a trustline for this asset.
-                    Connected issuer: <code>{publicKey}</code>
-                  </p>
-                  <button className="btn btn--primary" type="submit">
-                    {loading === "issue" ? "Issuing…" : "Issue to holder"}
-                  </button>
-                </form>
+
+              <form className="form" onSubmit={handleCreateClaimable}>
+                <h3 className="subhead">Create balance</h3>
+                <label className="label" htmlFor="claimable-claimant">
+                  Claimant public key
+                </label>
+                <input
+                  id="claimable-claimant"
+                  className="input"
+                  value={claimableForm.claimant}
+                  onChange={(e) =>
+                    setClaimableForm((prev) => ({ ...prev, claimant: e.target.value }))
+                  }
+                  placeholder="G..."
+                  required
+                />
+                <label className="label" htmlFor="claimable-asset">Asset</label>
+                <select
+                  id="claimable-asset"
+                  className="input"
+                  value={claimableForm.assetKey}
+                  onChange={(e) =>
+                    setClaimableForm((prev) => ({ ...prev, assetKey: e.target.value }))
+                  }
+                >
+                  {assetBalances.map((balance) => (
+                    <option key={balance.key} value={balance.key}>
+                      {balance.code}
+                      {!balance.isNative ? ` · ${shortenAddress(balance.issuer)}` : ""}
+                    </option>
+                  ))}
+                </select>
+                <label className="label" htmlFor="claimable-amount">Amount</label>
+                <input
+                  id="claimable-amount"
+                  className="input"
+                  type="number"
+                  step="0.0000001"
+                  min="0.0000001"
+                  value={claimableForm.amount}
+                  onChange={(e) =>
+                    setClaimableForm((prev) => ({ ...prev, amount: e.target.value }))
+                  }
+                  required
+                />
+                <label className="label" htmlFor="claimable-predicate">
+                  Claim condition
+                </label>
+                <select
+                  id="claimable-predicate"
+                  className="input"
+                  value={claimableForm.predicateMode}
+                  onChange={(e) =>
+                    setClaimableForm((prev) => ({
+                      ...prev,
+                      predicateMode: e.target.value,
+                    }))
+                  }
+                >
+                  <option value="unconditional">Unconditional</option>
+                  <option value="notBefore">Not before ledger time</option>
+                  <option value="notAfter">Not after ledger time</option>
+                </select>
+                {claimableForm.predicateMode !== "unconditional" && (
+                  <>
+                    <label className="label" htmlFor="claimable-ledger-time">
+                      Unix ledger time (seconds)
+                    </label>
+                    <input
+                      id="claimable-ledger-time"
+                      className="input"
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={claimableForm.ledgerTime}
+                      onChange={(e) =>
+                        setClaimableForm((prev) => ({
+                          ...prev,
+                          ledgerTime: e.target.value,
+                        }))
+                      }
+                      required
+                    />
+                  </>
+                )}
+                <button
+                  className="btn btn--primary"
+                  type="submit"
+                  disabled={loading === "claimable-create" || requireWallet}
+                >
+                  {loading === "claimable-create" ? (
+                    <><Spinner /> Creating…</>
+                  ) : (
+                    "Create claimable balance"
+                  )}
+                </button>
+              </form>
+
+              {claimableResult && (
+                <div className="info-box">
+                  <span className="eyebrow">
+                    {claimableResult.type === "claimed"
+                      ? "Balance claimed"
+                      : "Balance created"}
+                  </span>
+                  {claimableResult.balanceId && <code>{claimableResult.balanceId}</code>}
+                  <code>{claimableResult.hash}</code>
+                  <a
+                    className="text-link"
+                    href={explorerTxUrl(claimableResult.hash)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    View transaction on StellarExpert ↗
+                  </a>
+                </div>
+              )}
+
+              {claimableBalances.length > 0 ? (
+                <ul className="balance-list">
+                  {claimableBalances.map((balance) => (
+                    <li className="balance-row" key={balance.id}>
+                      <div>
+                        <strong>{balance.asset}</strong>
+                        <span className="muted balance-row__issuer">
+                          {balance.amount}
+                        </span>
+                      </div>
+                      <button
+                        className="btn btn--secondary btn--sm"
+                        type="button"
+                        onClick={() => handleClaimClaimable(balance)}
+                        disabled={loading === `claimable-${balance.id}`}
+                      >
+                        Claim
+                      </button>
+                    </li>
+                  ))}
+                </ul>
               ) : (
-                <p className="muted">Connect Freighter to issue an asset.</p>
+                <p className="muted">
+                  {requireWallet
+                    ? "Connect a wallet to load claimable balances."
+                    : "No claimable balances for this account."}
+                </p>
               )}
             </div>
           )}
