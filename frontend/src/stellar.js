@@ -597,6 +597,16 @@ export async function getAccountDetails(publicKey, options = {}) {
     }
   }
 
+  const account = await getServer().loadAccount(publicKey);
+  return {
+    id: account.id,
+    sequence: account.sequenceNumber(),
+    subentryCount: account.subentry_count,
+    thresholds: account.thresholds,
+    signers: account.signers,
+    balances: mapHorizonBalances(account),
+    explorerUrl: explorerAccountUrl(publicKey),
+  };
   return withHorizon429Backoff(async () => {
     const account = await getServer().loadAccount(publicKey);
     const baseReserve = await readBaseReserve();
