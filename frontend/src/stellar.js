@@ -1316,3 +1316,5 @@ export async function getPendingTransactions(publicKey, options = {}) {
       : null,
   };
 }
+
+export { summarizeEnvelopeSignatures } from "./multisigEnvelope";
