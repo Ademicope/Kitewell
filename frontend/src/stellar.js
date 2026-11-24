@@ -1011,81 +1011,91 @@ export function mapPendingTransaction(record) {
   };
 }
 
-export function isFederationAddress(destination) {
-  return typeof destination === "string" && destination.includes("*");
+/**
+ * Fetch and parse stellar.toml for a domain or issuer account.
+ *
+ * @param {string} domainOrIssuer Either a domain (e.g., "example.com") or a
+ *   Stellar public key (G...). When an issuer is provided, the SDK resolves
+ *   the home_domain from the account's on-chain data.
+ * @returns {Promise<object>} Parsed stellar.toml with keys like
+ *   TRANSFER_SERVER, WEB_AUTH_ENDPOINT, KYC_SERVER, CURRENCIES, etc.
+ */
+export async function fetchStellarToml(domainOrIssuer) {
+  if (!domainOrIssuer || typeof domainOrIssuer !== "string") {
+    throw new Error("Domain or issuer address is required.");
+  }
+
+  const trimmed = domainOrIssuer.trim();
+  if (!trimmed) {
+    throw new Error("Domain or issuer address is required.");
+  }
+
+  return StellarSdk.StellarTomlResolver.resolve(trimmed, {
+    allowHttp: false,
+  });
 }
 
 /**
- * Resolve a SEP-2 federation address to a Stellar account.
- * Public keys and other strings without an asterisk are returned unchanged.
+ * Fetch the SEP-24 info endpoint from a transfer server URL.
+ *
+ * @param {string} transferServerUrl The TRANSFER_SERVER URL from stellar.toml.
+ * @returns {Promise<object>} The parsed JSON response from the /info endpoint,
+ *   including deposit and withdraw asset details.
  */
-export async function resolveFederationAddress(destination) {
-  const value = typeof destination === "string" ? destination.trim() : "";
-  if (!value) return value;
-  if (!isFederationAddress(value)) return value;
-
-  const separator = value.indexOf("*");
-  const name = value.slice(0, separator).trim();
-  const domain = value.slice(separator + 1).trim();
-  if (!name || !domain) {
-    throw new Error("Federation address must look like name*domain.");
+export async function fetchTransferServerInfo(transferServerUrl) {
+  if (!transferServerUrl || typeof transferServerUrl !== "string") {
+    throw new Error("Transfer server URL is required.");
   }
 
-  let tomlResponse;
-  try {
-    tomlResponse = await fetch(`https://${domain}/.well-known/stellar.toml`);
-  } catch {
-    throw new Error(`Could not load stellar.toml for ${domain}.`);
-  }
-  if (!tomlResponse.ok) {
-    throw new Error(`Could not load stellar.toml for ${domain}.`);
+  const trimmed = transferServerUrl.trim();
+  if (!trimmed) {
+    throw new Error("Transfer server URL is required.");
   }
 
-  const toml = await tomlResponse.text();
-  const federationMatch = toml.match(
-    /^\s*FEDERATION_SERVER\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s#]+))\s*(?:#.*)?$/im
-  );
-  const federationServer = (
-    federationMatch?.[1] ||
-    federationMatch?.[2] ||
-    federationMatch?.[3] ||
-    ""
-  ).trim();
-  if (!federationServer) {
-    throw new Error(`${domain} has no FEDERATION_SERVER in its stellar.toml.`);
+  // Only allow HTTPS URLs for security
+  if (!trimmed.startsWith("https://")) {
+    throw new Error("Transfer server URL must use HTTPS.");
   }
 
-  let federationUrl;
-  try {
-    federationUrl = new URL(federationServer);
-  } catch {
-    throw new Error(`${domain} has an invalid FEDERATION_SERVER URL.`);
-  }
-  federationUrl.searchParams.set("type", "name");
-  federationUrl.searchParams.set("q", value);
+  // Build info endpoint URL, ensuring no double slashes
+  const baseUrl = trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+  const infoUrl = `${baseUrl}/info`;
 
-  let federationResponse;
-  try {
-    federationResponse = await fetch(federationUrl.toString());
-  } catch {
-    throw new Error("Federation lookup failed. Try again in a moment.");
-  }
-  if (!federationResponse.ok) {
-    throw new Error("Federation lookup failed. Check the federation address.");
+  const response = await fetch(infoUrl);
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch transfer server info: ${response.status} ${response.statusText}`
+    );
   }
 
-  let federation;
-  try {
-    federation = await federationResponse.json();
-  } catch {
-    throw new Error("Federation server returned an invalid response.");
-  }
-
-  const account = typeof federation.account === "string" ? federation.account.trim() : "";
-  if (!StellarSdk.StrKey.isValidEd25519PublicKey(account)) {
-    throw new Error("Federation lookup did not return a valid Stellar account.");
-  }
-  return account;
+  return response.json();
 }
 
-export const resolvePaymentDestination = resolveFederationAddress;
+/**
+ * Fetch stellar.toml and optionally the transfer server info for a domain or issuer.
+ *
+ * @param {string} domainOrIssuer Either a domain (e.g., "example.com") or a
+ *   Stellar public key (G...).
+ * @returns {Promise<object>} An object with:
+ *   - toml: The parsed stellar.toml
+ *   - transferServerInfo: The parsed /info response (null if TRANSFER_SERVER
+ *     is absent or the fetch fails)
+ */
+export async function fetchAnchorInfo(domainOrIssuer) {
+  const toml = await fetchStellarToml(domainOrIssuer);
+
+  let transferServerInfo = null;
+  if (toml.TRANSFER_SERVER) {
+    try {
+      transferServerInfo = await fetchTransferServerInfo(toml.TRANSFER_SERVER);
+    } catch {
+      // If the info endpoint fails, we still return the toml data
+      transferServerInfo = null;
+    }
+  }
+
+  return {
+    toml,
+    transferServerInfo,
+  };
+}
