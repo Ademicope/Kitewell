@@ -507,6 +507,14 @@ function mapHorizonBalances(account, baseReserve = 0.5) {
       balance: b.balance,
       limit: b.limit,
       isNative: false,
+      isAuthorized:
+        typeof b.is_authorized === "boolean" ? b.is_authorized : null,
+      isAuthorizedToMaintainLiabilities:
+        typeof b.is_authorized_to_maintain_liabilities === "boolean"
+          ? b.is_authorized_to_maintain_liabilities
+          : null,
+      clawbackEnabled:
+        typeof b.clawback_enabled === "boolean" ? b.clawback_enabled : null,
       ...liabilityFields(b, false, subentryCount, baseReserve),
     };
   });

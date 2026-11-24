@@ -9,6 +9,7 @@ import {
   changeTrustWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
+  simulateRegisterBuilder,
   setAccountOptionsWithFreighter,
   allowTrustWithFreighter,
   readContractInstanceTtl,
@@ -18,7 +19,6 @@ import {
   readKitewellEvents,
   submitFailureResult,
   signChallengeWithFreighter,
-  simulateRegisterBuilder,
 } from "./freighter";
 import {
   createFailedSubmitLog,
@@ -180,8 +180,8 @@ export default function App() {
   const [inspectResult, setInspectResult] = useState(null);
   const [inspectError, setInspectError] = useState(null);
   const [envelopeXdr, setEnvelopeXdr] = useState("");
-  const [decodeError, setDecodeError] = useState(null);
   const [decodedEnvelope, setDecodedEnvelope] = useState(null);
+  const [decodeError, setDecodeError] = useState(null);
   const tabRefs = useRef([]);
   const horizonAbortRef = useRef(null);
   const [accountDetails, setAccountDetails] = useState(null);
@@ -735,6 +735,13 @@ export default function App() {
     const selected = balances.find((b) => b.key === sendForm.assetKey);
     if (!selected) {
       showToast("Choose an asset you hold a trustline for.", "error");
+      return null;
+    }
+    if (!selected.isNative && selected.isAuthorized === false) {
+      showToast(
+        `${selected.code} is unauthorized by its issuer and cannot be sent.`,
+        "error"
+      );
       return null;
     }
     const available = parseFloat(selected.available || selected.balance);
@@ -1345,12 +1352,13 @@ export default function App() {
 
   const handleDecodeEnvelope = (event) => {
     event.preventDefault();
+    setDecodeError(null);
+    setDecodedEnvelope(null);
     try {
-      setDecodedEnvelope(decodeEnvelope(envelopeXdr));
-      setDecodeError(null);
+      setDecodedEnvelope(decodeEnvelope(envelopeXdr, activeNetwork.passphrase));
     } catch (error) {
       setDecodedEnvelope(null);
-      setDecodeError(error.message || "Could not decode this envelope.");
+      setDecodeError(error.message || "Could not decode the envelope.");
     }
   };
 
@@ -1856,6 +1864,13 @@ export default function App() {
                             {shortenAddress(b.issuer)}
                           </span>
                         )}
+                        {!b.isNative && (
+                          <div className="muted balance-row__flags">
+                            Authorization: {b.isAuthorized === true ? "Authorized" : b.isAuthorized === false ? "Unauthorized" : "Unknown"}
+                            {" · "}Liabilities: {b.isAuthorizedToMaintainLiabilities === true ? "Authorized" : b.isAuthorizedToMaintainLiabilities === false ? "Unauthorized" : "Unknown"}
+                            {" · "}Clawback: {b.clawbackEnabled === true ? "Enabled" : b.clawbackEnabled === false ? "Disabled" : "Unknown"}
+                          </div>
+                        )}
                       </div>
                       <div className="balance-row__actions">
                         <span>
@@ -2307,14 +2322,20 @@ export default function App() {
                   {balances
                     .filter((b) => !b.isNative && !b.isPoolShare)
                     .map((b) => (
-                      <option key={b.key} value={b.key}>
+                      <option key={b.key} value={b.key} disabled={b.isAuthorized === false}>
                         {b.code} ·{" "}
                         {parseFloat(b.balance).toLocaleString(undefined, {
                           maximumFractionDigits: 4,
                         })}
+                        {b.isAuthorized === false ? " · unauthorized (cannot send)" : ""}
                       </option>
                     ))}
                 </select>
+                {selectedSendAsset?.isAuthorized === false && (
+                  <p className="muted" role="alert">
+                    {selectedSendAsset.code} is unauthorized by its issuer, so it cannot be selected as a send asset.
+                  </p>
+                )}
                 <label className="label" htmlFor="send-amount">
                   Amount ({selectedSendAsset?.code ?? "XLM"})
                 </label>
