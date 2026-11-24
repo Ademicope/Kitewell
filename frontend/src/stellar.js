@@ -737,7 +737,7 @@ export async function getAccountBalances(publicKey, options = {}) {
   }, options);
 }
 
-export async function getAccountDetails(publicKey, options = {}) {
+export async function getAccountDetails(publicKey) {
   if (backendIsUsable()) {
     try {
       return await fetchAccountViaApi(publicKey);
@@ -759,19 +759,6 @@ export async function getAccountDetails(publicKey, options = {}) {
     signers: account.signers || [],
     explorerUrl: explorerAccountUrl(publicKey),
   };
-  return withHorizon429Backoff(async () => {
-    const account = await getServer().loadAccount(publicKey);
-    const baseReserve = await readBaseReserve();
-    return {
-      id: account.id,
-      sequence: account.sequenceNumber(),
-      subentryCount: account.subentry_count,
-      lastModifiedLedger: account.last_modified_ledger ?? null,
-      thresholds: account.thresholds,
-      balances: mapHorizonBalances(account, baseReserve),
-      explorerUrl: explorerAccountUrl(publicKey),
-    };
-  }, options);
 }
 
 function offerAssetDescriptor(asset) {
@@ -990,21 +977,23 @@ export function liquidityPoolWithdraw(poolId, amount, minAmountA, minAmountB) {
 export async function getTransactions(publicKey, limit = 15, cursor, options = {}) {
   if (backendIsUsable()) {
     try {
-      return await fetchPaymentsViaApi(publicKey, limit, cursor);
+      return options.signal
+        ? await fetchPaymentsViaApi(publicKey, limit, cursor, options)
+        : await fetchPaymentsViaApi(publicKey, limit, cursor);
     } catch {
       /* fall back to direct Horizon */
     }
   }
 
   return withHorizon429Backoff(async () => {
-    const payments = await getServer()
+    let request = getServer()
       .payments()
       .forAccount(publicKey)
       .limit(limit)
-      .order("desc")
-      // Embeds each payment's transaction record, the source of fee and operation count.
-      .join("transactions")
-      .call();
+      .order("desc");
+    if (cursor) request = request.cursor(cursor);
+    const payments = await request.call();
+    const lastRaw = payments.records[payments.records.length - 1];
 
     return {
       records: payments.records
@@ -1020,8 +1009,8 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
           created_at: p.created_at,
           ...mapTransactionFee(p.transaction),
         })),
-      // Paging straight off Horizon is out of scope, so this path is the last page.
-      nextCursor: null,
+      nextCursor:
+        payments.records.length < limit ? null : (lastRaw?.paging_token ?? null),
     };
   }, options);
 }
