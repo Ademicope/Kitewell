@@ -6,6 +6,7 @@ import {
   getActiveNetworkId,
   isFriendbotAvailable,
 } from "./network";
+import { calculateMinimumBalance } from "./accountReserve";
 
 /** Shown in the lab panel when Horizon asks the client to slow down. */
 export const HORIZON_SLOWDOWN_MESSAGE =
@@ -629,8 +630,23 @@ export async function getAccountDetails(publicKey, options = {}) {
   }, options);
 }
 
-export async function getBalance(publicKey, options = {}) {
-  const balances = await getAccountBalances(publicKey, options);
+export async function getLatestBaseReserve() {
+  const response = await getServer()
+    .ledgers()
+    .order("desc")
+    .limit(1)
+    .call();
+  const baseReserve = response.records?.[0]?.base_reserve_in_stroops;
+  if (!/^\d+$/.test(String(baseReserve ?? "")) || Number(baseReserve) <= 0) {
+    throw new Error("Latest ledger did not include a valid base reserve.");
+  }
+  return String(baseReserve);
+}
+
+export { calculateMinimumBalance };
+
+export async function getBalance(publicKey) {
+  const balances = await getAccountBalances(publicKey);
   const xlm = balances.find((b) => b.isNative);
   return xlm ? xlm.balance : "0";
 }

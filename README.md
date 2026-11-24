@@ -99,8 +99,10 @@ The Testnet lab UI, using the existing assets in [`screenshots/`](./screenshots)
 
 - Freighter connect / disconnect (`setAllowed`, `getAddress`, `signTransaction`)
 - Friendbot funding (Testnet only)
+- Source-funded account creation with live source-reserve and fee checks
 - Testnet / Futurenet network toggle (persisted in `localStorage`)
-- Balances + `changeTrust` (open a trustline or remove an empty one)
+- Balances + `changeTrust` (open a trustline or remove an empty one), with a
+  minimum-balance calculator and pre-sign reserve check
 - XLM + credit-asset payments (asset picked from balances) + history
 - Path payments (`pathPaymentStrictSend` / `pathPaymentStrictReceive`)
 - Read-only XDR inspector: paste a base64 transaction envelope to review its source, fee,
@@ -112,6 +114,8 @@ The Testnet lab UI, using the existing assets in [`screenshots/`](./screenshots)
 - Lab tab deploy: install the built `kitewell.wasm`, run `init(connected account)`, and use the new id for the session
 
 Send supports optional text memos up to 28 UTF-8 bytes, uint64 ID memos, and 32-byte hash memos.
+The reserve calculator and transaction checks use the base reserve reported by the latest
+Horizon ledger; if that ledger cannot be loaded, reserve-dependent signing is disabled.
 
 ### Path payments (Testnet)
 

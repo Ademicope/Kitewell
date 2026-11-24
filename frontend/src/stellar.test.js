@@ -14,12 +14,10 @@ vi.mock("./api", () => ({
   fetchPaymentsViaApi: vi.fn(),
 }));
 
-const { loadAccountMock, paymentsCallMock, orderBookCallMock, claimableCallMock, assetCallMock } = vi.hoisted(() => ({
+const { loadAccountMock, paymentsCallMock, ledgerCallMock } = vi.hoisted(() => ({
   loadAccountMock: vi.fn(),
   paymentsCallMock: vi.fn(),
-  orderBookCallMock: vi.fn(),
-  claimableCallMock: vi.fn(),
-  assetCallMock: vi.fn(),
+  ledgerCallMock: vi.fn(),
 }));
 
 vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
@@ -31,6 +29,11 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
       Server: vi.fn(function () {
         return {
           loadAccount: loadAccountMock,
+          ledgers: () => ({
+            order: () => ({
+              limit: () => ({ call: ledgerCallMock }),
+            }),
+          }),
           payments: () => ({
             forAccount: () => ({
               limit: () => ({
@@ -65,6 +68,7 @@ const {
   getAccountBalances,
   getAccountDetails,
   getBalance,
+  getLatestBaseReserve,
   getTransactions,
   getOrderBook,
   parsePathAssets,
@@ -104,10 +108,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   loadAccountMock.mockReset();
   paymentsCallMock.mockReset();
-  orderBookCallMock.mockReset();
-  claimableCallMock.mockReset();
-  assetCallMock.mockReset();
-  resetHorizon429BackoffForTests();
+  ledgerCallMock.mockReset();
+  ledgerCallMock.mockResolvedValue({
+    records: [{ base_reserve_in_stroops: "5000000" }],
+  });
 });
 
 afterEach(() => {
@@ -283,6 +287,20 @@ describe("getBalance", () => {
 
     await expect(getBalance("GTEST")).resolves.toBe("0");
     expect(loadAccountMock).toHaveBeenCalledWith("GTEST");
+  });
+});
+
+describe("getLatestBaseReserve", () => {
+  it("reads the base reserve from the latest Horizon ledger", async () => {
+    await expect(getLatestBaseReserve()).resolves.toBe("5000000");
+    expect(ledgerCallMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails explicitly when the latest ledger has no valid reserve", async () => {
+    ledgerCallMock.mockResolvedValue({ records: [] });
+    await expect(getLatestBaseReserve()).rejects.toThrow(
+      "Latest ledger did not include a valid base reserve."
+    );
   });
 });
 
