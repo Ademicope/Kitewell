@@ -3,9 +3,9 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import {
   checkFreighterInstalled,
   connectFreighterWallet,
-  buildPaymentEnvelope,
-  submitEnvelopeWithFreighter,
-  createAccountWithFreighter,
+  preparePaymentWithFreighter,
+  confirmPaymentWithFreighter,
+  sendPaymentWithFreighter,
   pathPaymentWithFreighter,
   changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
@@ -158,8 +158,15 @@ export default function App() {
     minTime: "",
     maxTime: "",
   });
-  const [sep7Uri, setSep7Uri] = useState("");
-  const [sep7Request, setSep7Request] = useState(null);
+  const [sendPrepared, setSendPrepared] = useState(null);
+
+  const updateSendForm = (changes) => {
+    setSendForm((previous) => ({
+      ...previous,
+      ...changes,
+    }));
+    setSendPrepared(null);
+  };
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [createAccountForm, setCreateAccountForm] = useState({
     destination: "",
@@ -926,7 +933,22 @@ export default function App() {
       return;
     }
 
-    setTransactionFailure(null);
+    const selected = balances.find((b) => b.key === sendForm.assetKey);
+    if (!selected) {
+      return showToast("Choose an asset you hold a trustline for.", "error");
+    }
+    if (parseFloat(amount) > parseFloat(selected.balance)) {
+      return showToast(
+        `Insufficient ${selected.code} balance. Available: ${selected.balance}.`,
+        "error"
+      );
+    }
+
+    const asset = selected.isNative
+      ? { isNative: true }
+      : { isNative: false, code: selected.code, issuer: selected.issuer };
+
+    setSendPrepared(null);
     setLoading("send");
     let paymentDestination;
     try {
@@ -937,7 +959,7 @@ export default function App() {
     }
 
     try {
-      const result = await sendPaymentWithFreighter(
+      const prepared = await preparePaymentWithFreighter(
         publicKey,
         paymentDestination,
         amount,
@@ -947,9 +969,36 @@ export default function App() {
         minTime,
         maxTime
       );
-      trackSubmission(result.hash, "payment");
+      setSendPrepared(prepared);
+      showToast("Payment prepared. Confirm in Freighter.");
+    } catch (err) {
+      showToast(err.message || "Payment preparation failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleConfirmSend = async () => {
+    if (!publicKey) {
+      return showToast("Connect Freighter first.", "error");
+    }
+
+    if (!sendPrepared?.transaction) {
+      return showToast("No payment prepared.", "error");
+    }
+
+    setLoading("send");
+
+    try {
+      const result = await confirmPaymentWithFreighter(
+        sendPrepared,
+        publicKey
+      );
+
       const next = await getAccountBalances(publicKey);
       setBalances(next);
+      setSendPrepared(null);
+
       setSendForm({
         destination: "",
         amount: "",
@@ -959,8 +1008,7 @@ export default function App() {
         minTime: "",
         maxTime: "",
       });
-      setSep7Uri("");
-      setSep7Request(null);
+
       showToast(
         `Payment submitted · ${result.hash.slice(0, 12)}…`,
         "success",
@@ -968,8 +1016,7 @@ export default function App() {
       );
       startTxWatch(result.hash);
     } catch (err) {
-      trackFailedSubmit("payment", err);
-      setTransactionFailure(err.transactionFailure ?? null);
+      // Preserve form values if the user refuses to sign or submission fails.
       showToast(err.message || "Payment failed.", "error");
     } finally {
       submitGuardRef.current.end("send");
@@ -3428,7 +3475,10 @@ export default function App() {
                   className="input"
                   value={sendForm.memoType}
                   onChange={(e) =>
-                    updateSendForm({ memoType: e.target.value, memo: "" })
+                    updateSendForm({
+                      memoType: e.target.value,
+                      memo: "",
+                    })
                   }
                 >
                   <option value="text">Text</option>
@@ -3449,26 +3499,6 @@ export default function App() {
                   value={sendForm.memo}
                   onChange={(e) => updateSendForm({ memo: e.target.value })}
                 />
-                <label className="label" htmlFor="send-min-time">
-                  Min time (UTC, optional)
-                </label>
-                <input
-                  id="send-min-time"
-                  className="input"
-                  type="datetime-local"
-                  value={sendForm.minTime}
-                  onChange={(e) => setSendForm({ ...sendForm, minTime: e.target.value })}
-                />
-                <label className="label" htmlFor="send-max-time">
-                  Max time (UTC, optional)
-                </label>
-                <input
-                  id="send-max-time"
-                  className="input"
-                  type="datetime-local"
-                  value={sendForm.maxTime}
-                  onChange={(e) => setSendForm({ ...sendForm, maxTime: e.target.value })}
-                />
                 <button
                   className="btn btn--primary"
                   type="submit"
@@ -3476,21 +3506,73 @@ export default function App() {
                 >
                   {loading === "send" ? (
                     <>
-                      <Spinner /> Signing in Freighter…
+                      <Spinner /> Preparing payment…
                     </>
                   ) : (
-                    "Sign & send"
+                    "Review payment"
                   )}
                 </button>
               </form>
 
-              {resolvedFederation && (
+              {sendPrepared && (
                 <div className="info-box">
-                  <span className="eyebrow">Resolved federation address</span>
-                  <code>{resolvedFederation}</code>
-                  <p className="muted" style={{ marginTop: 4 }}>
-                    Destination account resolved before signing.
+                  <span className="eyebrow">Review payment</span>
+
+                  <p>
+                    <strong>Destination:</strong>
+                    <br />
+                    {sendPrepared.summary.destination}
                   </p>
+
+                  <p>
+                    <strong>Amount:</strong>
+                    <br />
+                    {sendPrepared.summary.amount}
+                  </p>
+
+                  <p>
+                    <strong>Asset:</strong>
+                    <br />
+                    {sendPrepared.summary.asset}
+                  </p>
+
+                  <p>
+                    <strong>Memo:</strong>
+                    <br />
+                    {sendPrepared.summary.memo}
+                  </p>
+
+                  <p>
+                    <strong>Network fee:</strong>
+                    <br />
+                    {sendPrepared.summary.fee} stroops
+                  </p>
+
+                  <div className="info-box__actions">
+                    <button
+                      className="btn btn--primary"
+                      type="button"
+                      onClick={handleConfirmSend}
+                      disabled={loading === "send"}
+                    >
+                      {loading === "send" ? (
+                        <>
+                          <Spinner /> Waiting for Freighter…
+                        </>
+                      ) : (
+                        "Confirm in Freighter"
+                      )}
+                    </button>
+
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      disabled={loading === "send"}
+                      onClick={() => setSendPrepared(null)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

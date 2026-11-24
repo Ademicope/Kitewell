@@ -968,106 +968,149 @@ export async function changeTrustWithFreighter(
   return signAndSubmit(transaction, publicKey);
 }
 
-const SEP7_ASSET_CODE = /^[A-Za-z0-9]{1,12}$/;
+async function getPaymentFee(server) {
+  if (typeof server.feeStats !== "function") return StellarSdk.BASE_FEE;
 
-export function parseSep7PayUri(uri) {
-  const value = typeof uri === "string" ? uri.trim() : "";
-  if (!value) throw new Error("SEP-7 URI is required.");
-
-  let parsed;
   try {
-    parsed = new URL(value);
+    const stats = await server.feeStats();
+    const charged = stats?.fee_charged;
+    const fee = charged?.p10 ?? charged?.mode ?? charged?.min;
+    const feeNumber = Number(fee);
+    return Number.isSafeInteger(feeNumber) && feeNumber > 0
+      ? feeNumber
+      : StellarSdk.BASE_FEE;
   } catch {
-    throw new Error("Invalid SEP-7 URI.");
+    return StellarSdk.BASE_FEE;
   }
+}
 
-  if (parsed.protocol !== "web+stellar:") {
-    throw new Error("URI must use the web+stellar scheme.");
-  }
+async function dryRunPaymentTransaction(transaction) {
+  if (typeof fetch !== "function") return;
 
-  const operation = parsed.pathname.replace(/^\/+|\/+$/g, "");
-  if (operation !== "pay") {
-    throw new Error("Only SEP-7 pay requests are supported.");
-  }
+  const network = getActiveNetwork();
+  if (!network?.horizonUrl) return;
 
-  const params = parsed.searchParams;
-  const destination = (params.get("destination") || "").trim();
-  if (!destination) {
-    throw new Error("SEP-7 pay URI requires a destination.");
+  try {
+    const endpoint = new URL("transactions", `${network.horizonUrl}/`);
+    endpoint.searchParams.set("dry_run", "true");
+
+    const response = await fetch(endpoint.toString(), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ tx: transaction.toXDR() }).toString(),
+    });
+
+    if ([404, 405, 501].includes(response.status)) return;
+
+    let result = null;
+    try {
+      result = await response.json();
+    } catch {
+      result = null;
+    }
+
+    if (response.ok) return;
+
+    const resultCodes = result?.extras?.result_codes;
+    const transactionCode =
+      resultCodes?.transaction || result?.transaction_result_code;
+    const horizonRejected = !response.ok && ([400, 422].includes(response.status) || Boolean(
+      resultCodes || result?.transaction_result_code
+    ));
+    const operationCodes = Array.isArray(resultCodes?.operations)
+      ? resultCodes.operations.filter(Boolean).join(", ")
+      : null;
+    const unsuccessfulDryRun = Boolean(
+      transactionCode &&
+      transactionCode !== "tx_success" &&
+      transactionCode !== "success"
+    );
+
+    if (!horizonRejected && !unsuccessfulDryRun) return;
+
+    throw new Error(
+      `Horizon rejected this payment${transactionCode ? ` (${transactionCode}${operationCodes ? `: ${operationCodes}` : ""})` : ""}.`
+    );
+  } catch (error) {
+    if (error?.message?.startsWith("Horizon rejected this payment")) {
+      throw error;
+    }
+    // The endpoint or parameter is not exposed; fee calculation + review still work.
   }
+}
+
+export async function preparePaymentWithFreighter(
+  publicKey,
+  destination,
+  amount,
+  asset = null,
+  memoType = "text",
+  memo = ""
+) {
   if (!StellarSdk.StrKey.isValidEd25519PublicKey(destination)) {
-    throw new Error("SEP-7 destination must be a valid Stellar public key (G…).");
+    throw new Error("Destination must be a valid Stellar public key (G…).");
   }
 
-  const amount = (params.get("amount") || "").trim();
+  const transactionMemo = createMemo(memoType, memo);
+  const paymentAsset = resolvePaymentAsset(asset);
+  const server = getServer();
+  const sourceAccount = await server.loadAccount(publicKey);
+  const fee = await getPaymentFee(server);
+  const txBuilder = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: fee.toString(),
+    networkPassphrase: currentPassphrase(),
+  }).addOperation(
+    StellarSdk.Operation.payment({
+      destination,
+      asset: paymentAsset,
+      amount: amount.toString(),
+    })
+  );
 
-  let assetCode = (params.get("asset_code") || "").trim();
-  let assetIssuer = (params.get("asset_issuer") || "").trim();
-  const assetParam = (params.get("asset") || "").trim();
+  if (transactionMemo) txBuilder.addMemo(transactionMemo);
+  const transaction = txBuilder.setTimeout(180).build();
 
-  if (assetParam && (!assetCode || !assetIssuer)) {
-    if (/^(native|xlm)$/i.test(assetParam)) {
-      assetCode = "";
-      assetIssuer = "";
-    } else {
-      const separator = assetParam.indexOf(":");
-      if (separator <= 0) {
-        throw new Error("SEP-7 asset must be XLM or CODE:ISSUER.");
-      }
-      assetCode = assetParam.slice(0, separator).trim();
-      assetIssuer = assetParam.slice(separator + 1).trim();
-    }
-  }
-
-  let asset;
-  let assetKey;
-
-  // XLM is native when no issuer is supplied.
-  if (
-    (!assetCode && !assetIssuer) ||
-    (!assetIssuer && /^(native|xlm)$/i.test(assetCode))
-  ) {
-    assetCode = "";
-    assetIssuer = "";
-    asset = { isNative: true };
-    assetKey = "native";
-  } else {
-    if (!SEP7_ASSET_CODE.test(assetCode) || !assetIssuer) {
-      throw new Error("SEP-7 credit asset requires a valid code and issuer.");
-    }
-    if (!StellarSdk.StrKey.isValidEd25519PublicKey(assetIssuer)) {
-      throw new Error("SEP-7 asset issuer must be a valid Stellar public key (G…).");
-    }
-    assetCode = assetCode.toUpperCase();
-    asset = { isNative: false, code: assetCode, issuer: assetIssuer };
-    assetKey = `${assetCode}:${assetIssuer}`;
-  }
-
-  const rawMemoType = (params.get("memo_type") || "text").trim().toLowerCase();
-  let memoType;
-  if (["text", "memo_text"].includes(rawMemoType)) memoType = "text";
-  else if (["id", "memo_id"].includes(rawMemoType)) memoType = "id";
-  else if (["hash", "memo_hash"].includes(rawMemoType)) memoType = "hash";
-  else throw new Error(`Unsupported SEP-7 memo type: ${rawMemoType}`);
-
-  const memo = params.get("memo") || "";
-  const signature = params.get("signature") || "";
-  const originDomain = params.get("origin_domain") || "";
+  await dryRunPaymentTransaction(transaction);
 
   return {
-    destination,
-    amount,
-    asset,
-    assetKey,
-    assetCode,
-    assetIssuer,
-    memo,
-    memoType,
-    signature,
-    originDomain,
-    origin_domain: originDomain,
+    transaction,
+    summary: {
+      destination,
+      amount: amount.toString(),
+      asset: paymentAsset.isNative()
+        ? "XLM (native)"
+        : `${paymentAsset.getCode()} · ${paymentAsset.getIssuer()}`,
+      memo:
+        memoType === "text" && memo
+          ? `Text: ${memo}`
+          : memoType === "id" && memo
+            ? `ID: ${memo}`
+            : memoType === "hash" && memo
+              ? `Hash: ${memo}`
+              : "None",
+      fee: fee.toString(),
+    },
   };
 }
 
-// Short alias for callers and tests that use URI rather than Uri naming.
-export const parseSep7Uri = parseSep7PayUri;
+export async function confirmPaymentWithFreighter(prepared, publicKey) {
+  if (!prepared?.transaction) {
+    throw new Error("Confirm a prepared payment transaction first.");
+  }
+
+  if (!publicKey) {
+    throw new Error("A connected Stellar account is required.");
+  }
+
+  // Sign the exact transaction shown in the payment review.
+  const signedTx = await signWithFreighter(
+    prepared.transaction.toXDR(),
+    publicKey
+  );
+
+  // Submit only after explicit user confirmation and signing.
+  return getServer().submitTransaction(signedTx);
+}
