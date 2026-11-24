@@ -17,6 +17,7 @@ import {
 import { parseHorizonError } from "./horizonErrorParse";
 import { formatTrustlineLimit } from "./trustlineLimitFormat";
 import { parseSimulationFees } from "./simulationFees";
+import { getFeePerOperation } from "./feeSetting";
 import {
   HORIZON_FAILURE_CODE,
   freighterCancelledError,
@@ -36,6 +37,11 @@ function getServer() {
 
 function currentPassphrase() {
   return getActiveNetwork().passphrase;
+}
+
+/** Selected fee per operation; falls back to the SDK default (100 stroops). */
+function selectedFeePerOperation() {
+  return getFeePerOperation() ?? StellarSdk.BASE_FEE;
 }
 
 const MAX_MEMO_TEXT_BYTES = 28;
@@ -745,7 +751,7 @@ export async function buildUnsignedEnvelope(
   // Load the account immediately before building so a stale sequence is refused.
   const sourceAccount = await getServer().loadAccount(publicKey);
   const txBuilder = new StellarSdk.TransactionBuilder(sourceAccount, {
-    fee: StellarSdk.BASE_FEE,
+    fee: selectedFeePerOperation(),
     networkPassphrase: currentPassphrase(),
   });
 
@@ -942,7 +948,7 @@ export async function pathPaymentWithFreighter({
   // Load the account immediately before building so a stale sequence is refused.
   const sourceAccount = await getServer().loadAccount(publicKey);
   const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
-    fee: StellarSdk.BASE_FEE,
+    fee: selectedFeePerOperation(),
     networkPassphrase: currentPassphrase(),
   })
     .addOperation(operation)
@@ -1057,7 +1063,7 @@ export async function changeTrustWithFreighter(
   }
 
   const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
-    fee: StellarSdk.BASE_FEE,
+    fee: selectedFeePerOperation(),
     networkPassphrase: currentPassphrase(),
   })
     .addOperation(

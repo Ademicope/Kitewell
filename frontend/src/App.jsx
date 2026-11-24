@@ -42,6 +42,7 @@ import {
   getLiquidityPool,
   getLatestBaseReserve,
   getTransactions,
+  getFeeStats,
   explorerAccountUrl,
   explorerTxUrl,
   resolveFederationAddress,
@@ -71,7 +72,7 @@ import {
   setActiveNetwork,
 } from "./network";
 import { validateAssetCode } from "./validateAssetCode";
-import { checkThresholds } from "./thresholdCheck";
+import { loadFeeSetting, saveFeeSetting } from "./feeSetting";
 import { decodeTransactionEnvelope } from "./txInspector";
 import TransactionFailureNotice from "./TransactionFailureNotice";
 import "./App.css";
@@ -87,7 +88,7 @@ const TABS = [
   "Offer",
   "Book",
   "History",
-  "Compose",
+  "Fees",
   "Pending",
   "Inspect",
   "Decode",
@@ -96,6 +97,11 @@ const TABS = [
   "Muxed",
   "Lab",
   "Issue",
+];
+const FEE_PERCENTILES = [
+  { key: "mode", label: "Mode" },
+  { key: "p10", label: "p10" },
+  { key: "p99", label: "p99" },
 ];
 const PENDING_REFRESH_MS = 8000;
 const EVENT_POLL_MS = 6000;
@@ -207,21 +213,13 @@ export default function App() {
   });
   const [registerForm, setRegisterForm] = useState({ name: "" });
   const [lastRegisterTx, setLastRegisterTx] = useState(null);
-  const [composeForm, setComposeForm] = useState({
-    type: "payment",
-    destination: "",
-    amount: "",
-    assetKey: "native",
-    code: "",
-    issuer: "",
-    limit: "1000000",
-    name: "",
-    value: "",
+  const [feeStats, setFeeStats] = useState(null);
+  const [feeStatsError, setFeeStatsError] = useState(null);
+  const [feeSetting, setFeeSetting] = useState(() => loadFeeSetting());
+  const [customFee, setCustomFee] = useState(() => {
+    const saved = loadFeeSetting();
+    return saved?.source === "custom" ? saved.stroops : "";
   });
-  const [composeOps, setComposeOps] = useState([]);
-  const [composeResult, setComposeResult] = useState(null);
-  const [composeError, setComposeError] = useState(null);
-  const composeId = useRef(0);
   const [inspectForm, setInspectForm] = useState({ xdr: "" });
   const [inspectResult, setInspectResult] = useState(null);
   const [inspectError, setInspectError] = useState(null);
@@ -1979,8 +1977,47 @@ export default function App() {
     }
   };
 
+  const loadFeeStats = async () => {
+    setLoading("feestats");
+    setFeeStatsError(null);
+    setFeeStats(null);
+    try {
+      setFeeStats(await getFeeStats());
+    } catch {
+      setFeeStatsError("Fee stats could not be loaded.");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const applyFeePreset = (source) => {
+    const stroops = feeStats?.[source];
+    if (!stroops) {
+      return showToast("Load fee stats before choosing a percentile.", "error");
+    }
+
+    try {
+      setFeeSetting(saveFeeSetting({ source, stroops }));
+      showToast(`Fee set to ${stroops} stroops per operation.`);
+    } catch (err) {
+      showToast(err.message || "Could not save the fee.", "error");
+    }
+  };
+
+  const handleCustomFee = (event) => {
+    event.preventDefault();
+    try {
+      const saved = saveFeeSetting({ source: "custom", stroops: customFee });
+      setFeeSetting(saved);
+      showToast(`Fee set to ${saved.stroops} stroops per operation.`);
+    } catch (err) {
+      showToast(err.message || "Could not save the fee.", "error");
+    }
+  };
+
   const activateTab = (tab) => {
     setActiveTab(tab);
+    if (tab === "Fees") loadFeeStats();
     if (tab === "History") handleHistory();
     if (tab === "Lab") {
       loadLabInfo();
@@ -3787,258 +3824,99 @@ export default function App() {
             </div>
           )}
 
-          {activeTab === "Compose" && (
+          {activeTab === "Fees" && (
             <div className="section">
               <div className="section__row">
-                <h2>Multi-operation composer</h2>
-                <span className="muted">
-                  {composeOps.length} / {MAX_COMPOSED_OPERATIONS}
-                </span>
-              </div>
-              <p className="muted">
-                Add payment, change trust, and manage data operations, reorder them,
-                then sign once. Every operation lands in one transaction with one fee
-                and one hash.
-              </p>
-
-              <form className="form" onSubmit={handleComposeAdd}>
-                <label className="label" htmlFor="compose-type">
-                  Operation type
-                </label>
-                <select
-                  id="compose-type"
-                  className="input"
-                  value={composeForm.type}
-                  onChange={(e) =>
-                    setComposeForm({ ...composeForm, type: e.target.value })
-                  }
-                >
-                  <option value="payment">Payment</option>
-                  <option value="changeTrust">Change trust</option>
-                  <option value="manageData">Manage data</option>
-                </select>
-
-                {composeForm.type === "payment" && (
-                  <>
-                    <label className="label" htmlFor="compose-destination">
-                      Destination
-                    </label>
-                    <input
-                      id="compose-destination"
-                      className="input"
-                      type="text"
-                      placeholder="G…"
-                      value={composeForm.destination}
-                      onChange={(e) =>
-                        setComposeForm({
-                          ...composeForm,
-                          destination: e.target.value,
-                        })
-                      }
-                    />
-                    <label className="label" htmlFor="compose-asset">
-                      Asset
-                    </label>
-                    <select
-                      id="compose-asset"
-                      className="input"
-                      value={composeForm.assetKey}
-                      onChange={(e) =>
-                        setComposeForm({ ...composeForm, assetKey: e.target.value })
-                      }
-                    >
-                      <option value="native">XLM (native)</option>
-                      {balances
-                        .filter((b) => !b.isNative)
-                        .map((b) => (
-                          <option key={b.key} value={b.key}>
-                            {b.code}
-                          </option>
-                        ))}
-                    </select>
-                    <label className="label" htmlFor="compose-amount">
-                      Amount ({selectedComposeAsset?.code ?? "XLM"})
-                    </label>
-                    <input
-                      id="compose-amount"
-                      className="input"
-                      type="number"
-                      step="0.0000001"
-                      min="0.0000001"
-                      placeholder="e.g. 10"
-                      value={composeForm.amount}
-                      onChange={(e) =>
-                        setComposeForm({ ...composeForm, amount: e.target.value })
-                      }
-                    />
-                  </>
-                )}
-
-                {composeForm.type === "changeTrust" && (
-                  <>
-                    <label className="label" htmlFor="compose-code">
-                      Asset code
-                    </label>
-                    <input
-                      id="compose-code"
-                      className="input"
-                      type="text"
-                      maxLength={12}
-                      placeholder="USDC"
-                      value={composeForm.code}
-                      onChange={(e) =>
-                        setComposeForm({ ...composeForm, code: e.target.value })
-                      }
-                    />
-                    <label className="label" htmlFor="compose-issuer">
-                      Issuer
-                    </label>
-                    <input
-                      id="compose-issuer"
-                      className="input"
-                      type="text"
-                      placeholder="G…"
-                      value={composeForm.issuer}
-                      onChange={(e) =>
-                        setComposeForm({ ...composeForm, issuer: e.target.value })
-                      }
-                    />
-                    <label className="label" htmlFor="compose-limit">
-                      Limit
-                    </label>
-                    <input
-                      id="compose-limit"
-                      className="input"
-                      type="text"
-                      placeholder="1000000"
-                      value={composeForm.limit}
-                      onChange={(e) =>
-                        setComposeForm({ ...composeForm, limit: e.target.value })
-                      }
-                    />
-                  </>
-                )}
-
-                {composeForm.type === "manageData" && (
-                  <>
-                    <label className="label" htmlFor="compose-data-name">
-                      Data entry name
-                    </label>
-                    <input
-                      id="compose-data-name"
-                      className="input"
-                      type="text"
-                      placeholder="invoice"
-                      value={composeForm.name}
-                      onChange={(e) =>
-                        setComposeForm({ ...composeForm, name: e.target.value })
-                      }
-                    />
-                    <label className="label" htmlFor="compose-data-value">
-                      Value (optional)
-                    </label>
-                    <input
-                      id="compose-data-value"
-                      className="input"
-                      type="text"
-                      placeholder="Leave empty to delete the entry"
-                      value={composeForm.value}
-                      onChange={(e) =>
-                        setComposeForm({ ...composeForm, value: e.target.value })
-                      }
-                    />
-                  </>
-                )}
-
-                <button className="btn btn--secondary" type="submit">
-                  Add operation
-                </button>
-              </form>
-
-              <div className="subhead">Operations</div>
-              {composeOps.length === 0 ? (
-                <p className="muted">No operations yet. Add one above.</p>
-              ) : (
-                composeOps.map((operation, index) => (
-                  <div className="info-box" key={operation.id}>
-                    <div className="section__row">
-                      <span>
-                        <strong>{index + 1}.</strong>{" "}
-                        {describeComposeOperation(operation)}
-                      </span>
-                      <span>
-                        <button
-                          className="btn btn--secondary"
-                          type="button"
-                          onClick={() => moveComposeOperation(index, -1)}
-                          disabled={index === 0}
-                          aria-label={`Move operation ${index + 1} up`}
-                        >
-                          ↑
-                        </button>{" "}
-                        <button
-                          className="btn btn--secondary"
-                          type="button"
-                          onClick={() => moveComposeOperation(index, 1)}
-                          disabled={index === composeOps.length - 1}
-                          aria-label={`Move operation ${index + 1} down`}
-                        >
-                          ↓
-                        </button>{" "}
-                        <button
-                          className="btn btn--secondary"
-                          type="button"
-                          onClick={() => removeComposeOperation(index)}
-                          aria-label={`Remove operation ${index + 1}`}
-                        >
-                          Remove
-                        </button>
-                      </span>
-                    </div>
-                  </div>
-                ))
-              )}
-
-              <div className="section__row">
+                <h2>Network fee</h2>
                 <button
-                  className="btn btn--primary"
+                  className="btn btn--secondary"
                   type="button"
-                  onClick={handleComposeSubmit}
-                  disabled={
-                    loading === "compose" ||
-                    composeOps.length === 0 ||
-                    requireWallet
-                  }
+                  onClick={loadFeeStats}
+                  disabled={loading === "feestats"}
                 >
-                  {loading === "compose" ? (
+                  {loading === "feestats" ? (
                     <>
-                      <Spinner /> Signing in Freighter…
+                      <Spinner /> Loading…
                     </>
                   ) : (
-                    "Sign & submit all"
+                    "Refresh stats"
                   )}
                 </button>
               </div>
-              {composeError && (
+              <p className="muted">
+                Horizon reports the fees charged in the last ledger. Pick one of its
+                percentiles or type your own; the next payment, trustline, or path
+                payment uses that fee per operation.
+              </p>
+
+              <div className="info-box">
+                <span className="eyebrow">Current fee</span>
+                <code>
+                  {feeSetting
+                    ? `${feeSetting.stroops} stroops per operation`
+                    : "SDK default (100 stroops per operation)"}
+                </code>
+                {feeSetting && (
+                  <p className="muted" style={{ marginTop: 6 }}>
+                    Source:{" "}
+                    {feeSetting.source === "custom"
+                      ? "custom"
+                      : `Horizon ${feeSetting.source}`}
+                  </p>
+                )}
+              </div>
+
+              {feeStatsError && (
                 <div className="info-box info-box--warning" role="alert">
-                  <span className="eyebrow">Composed transaction failed</span>
-                  <p className="muted">{composeError}</p>
+                  <span className="eyebrow">Fee stats</span>
+                  <p className="muted">{feeStatsError}</p>
                 </div>
               )}
-              {composeResult && (
+
+              {feeStats && (
                 <div className="info-box">
-                  <span className="eyebrow">Submitted · one transaction</span>
-                  <code>{composeResult.hash}</code>
-                  <a
-                    href={composeResult.explorerUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-link"
-                  >
-                    Explorer ↗
-                  </a>
+                  <span className="eyebrow">
+                    Last ledger
+                    {feeStats.lastLedger ? ` · ${feeStats.lastLedger}` : ""}
+                  </span>
+                  <div className="metadata-grid">
+                    {FEE_PERCENTILES.map(({ key, label }) => (
+                      <div key={key}>
+                        <span className="metadata-label">{label}</span>
+                        <span className="metadata-value">
+                          {feeStats[key]} stroops
+                        </span>
+                        <button
+                          className="btn btn--secondary"
+                          type="button"
+                          onClick={() => applyFeePreset(key)}
+                        >
+                          Use {label}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
+
+              <form className="form" onSubmit={handleCustomFee}>
+                <label className="label" htmlFor="custom-fee">
+                  Custom fee (stroops per operation)
+                </label>
+                <input
+                  id="custom-fee"
+                  className="input"
+                  type="number"
+                  min="1"
+                  step="1"
+                  placeholder="e.g. 500"
+                  value={customFee}
+                  onChange={(e) => setCustomFee(e.target.value)}
+                />
+                <button className="btn btn--secondary" type="submit">
+                  Use custom fee
+                </button>
+              </form>
             </div>
           )}
 

@@ -77,7 +77,7 @@ With no `KITEWELL_CONTRACT_ID` configured, the **Lab** tab can also deploy the e
 npm test
 ```
 
-Vitest suite in `frontend/src/stellar.test.js` covers the stellar helpers (explorer URLs, asset/path parsing, Friendbot funding, balance/payment mapping, backend → Horizon fallback) with mocked Horizon SDK and API calls — CI-friendly, no Freighter wallet or network access required. `frontend/src/path-payment.test.js` covers amount normalization and path-payment operation building. `frontend/src/freighter.test.js` covers the Lab-tab Soroban registry reads and `register` invoke. `frontend/src/txInspector.test.js` covers decoding a payment envelope, a truncated XDR, the wrong-network passphrase error, and fee-bump inner transactions. `frontend/src/compose-transaction.test.js` covers ordered multi-operation building, one-signature submission, the empty/over-100 guards, and the Horizon failed-operation index.
+Vitest suite in `frontend/src/stellar.test.js` covers the stellar helpers (explorer URLs, asset/path parsing, Friendbot funding, balance/payment mapping, backend → Horizon fallback) with mocked Horizon SDK and API calls — CI-friendly, no Freighter wallet or network access required. `frontend/src/path-payment.test.js` covers amount normalization and path-payment operation building. `frontend/src/freighter.test.js` covers the Lab-tab Soroban registry reads and `register` invoke. `frontend/src/txInspector.test.js` covers decoding a payment envelope, a truncated XDR, the wrong-network passphrase error, and fee-bump inner transactions. `frontend/src/fee-setting.test.js` covers fee validation, persistence, and the per-operation fee used by payments, trustlines, and path payments; `frontend/src/fee-stats.test.js` covers the Horizon `/fee_stats` mapping.
 
 ## Screenshots
 
@@ -105,8 +105,9 @@ The Testnet lab UI, using the existing assets in [`screenshots/`](./screenshots)
   minimum-balance calculator and pre-sign reserve check
 - XLM + credit-asset payments (asset picked from balances) + history
 - Path payments (`pathPaymentStrictSend` / `pathPaymentStrictReceive`)
-- Multi-operation composer: combine payment, change-trust, and manage-data operations,
-  reorder or remove rows, then sign once for one hash (up to 100 operations)
+- Network fee selector: reads Horizon fee stats (mode / p10 / p99), accepts a custom
+  stroop fee, and applies the saved choice per operation to the next payment,
+  trustline, or path payment
 - Read-only XDR inspector: paste a base64 transaction envelope to review its source, fee,
   sequence, memo, time bounds, and operations before signing (fee-bump aware). Nothing is
   submitted.
