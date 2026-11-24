@@ -4,6 +4,7 @@ import {
   connectFreighterWallet,
   buildPaymentEnvelope,
   submitEnvelopeWithFreighter,
+  sendPaymentWithFreighter,
   pathPaymentWithFreighter,
   changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
@@ -98,6 +99,7 @@ const TABS = [
   "Web auth",
   "Muxed",
   "Lab",
+  "Issue",
 ];
 const PENDING_REFRESH_MS = 8000;
 const EVENT_POLL_MS = 6000;
@@ -172,6 +174,11 @@ export default function App() {
     destCode: "",
     destIssuer: "",
     path: "",
+  });
+  const [issueForm, setIssueForm] = useState({
+    code: "",
+    destination: "",
+    amount: "",
   });
   const [pathResult, setPathResult] = useState(null);
   const [bookPair, setBookPair] = useState(readStoredOrderBookPair);
@@ -681,6 +688,46 @@ export default function App() {
     } catch (err) {
       trackFailedSubmit("changeTrust", err);
       showToast(err.message || "Change trust failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleIssue = async (e) => {
+    e.preventDefault();
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+
+    let code;
+    let amount;
+    try {
+      code = validateAssetCode(issueForm.code);
+      amount = validatePaymentAmount(issueForm.amount, "Issuance amount");
+    } catch (err) {
+      return showToast(err.message, "error");
+    }
+
+    if (!issueForm.destination.trim()) {
+      return showToast("Holder account is required.", "error");
+    }
+
+    setLoading("issue");
+    try {
+      const result = await sendPaymentWithFreighter(
+        publicKey,
+        issueForm.destination.trim(),
+        amount,
+        { isNative: false, code, issuer: publicKey }
+      );
+      setIssueForm({ code: "", destination: "", amount: "" });
+      showToast(
+        `Issued ${amount} ${code} · ${result.hash.slice(0, 12)}…`,
+        "success",
+        explorerTxUrl(result.hash)
+      );
+      startTxWatch(result.hash);
+    } catch (err) {
+      trackFailedSubmit("issue", err);
+      showToast(err.message || "Issue failed.", "error");
     } finally {
       setLoading("");
     }
@@ -1559,7 +1606,11 @@ export default function App() {
         <p className="muted" id="watch-tx-hash-help" role={hashError ? "alert" : undefined}>
           {hashError || "Paste any transaction hash from this network to follow it."}
         </p>
-        <button className="btn btn--primary" type="submit">
+        <button
+          className="btn btn--primary"
+          type="submit"
+          disabled={loading === "issue"}
+        >
           Watch status
         </button>
       </form>
@@ -3489,6 +3540,74 @@ export default function App() {
               </div>
 
               {txWatchPanel}
+            </div>
+          )}
+
+          {activeTab === "Issue" && (
+            <div className="section">
+              <div className="section__row">
+                <h2>Issue Credit Asset</h2>
+                <p className="muted">
+                  Send a new credit asset from your issuer account to a holder.
+                </p>
+              </div>
+              {publicKey ? (
+                <form className="form" onSubmit={handleIssue}>
+                  <label className="label" htmlFor="issue-asset-code">
+                    Asset code
+                  </label>
+                  <input
+                    id="issue-asset-code"
+                    className="input"
+                    value={issueForm.code}
+                    onChange={(e) =>
+                      setIssueForm({ ...issueForm, code: e.target.value })
+                    }
+                    placeholder="e.g. MYASSET"
+                    maxLength={12}
+                    required
+                  />
+                  <label className="label" htmlFor="issue-destination">
+                    Holder account
+                  </label>
+                  <input
+                    id="issue-destination"
+                    className="input"
+                    type="text"
+                    placeholder="G…"
+                    value={issueForm.destination}
+                    onChange={(e) =>
+                      setIssueForm({ ...issueForm, destination: e.target.value })
+                    }
+                    required
+                  />
+                  <label className="label" htmlFor="issue-amount">
+                    Amount to issue
+                  </label>
+                  <input
+                    id="issue-amount"
+                    className="input"
+                    type="number"
+                    min="0.0000001"
+                    step="0.0000001"
+                    placeholder="e.g. 1000000"
+                    value={issueForm.amount}
+                    onChange={(e) =>
+                      setIssueForm({ ...issueForm, amount: e.target.value })
+                    }
+                    required
+                  />
+                  <p className="muted">
+                    The holder must already have a trustline for this asset.
+                    Connected issuer: <code>{publicKey}</code>
+                  </p>
+                  <button className="btn btn--primary" type="submit">
+                    {loading === "issue" ? "Issuing…" : "Issue to holder"}
+                  </button>
+                </form>
+              ) : (
+                <p className="muted">Connect Freighter to issue an asset.</p>
+              )}
             </div>
           )}
 
