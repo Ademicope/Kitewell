@@ -8,9 +8,6 @@ import {
   signAuthEntry,
 } from "@stellar/freighter-api";
 import * as StellarSdk from "@stellar/stellar-sdk";
-import { HORIZON_URL } from "./stellar";
-import { API_BASE } from "./config";
-
 import { Buffer } from "buffer";
 import { findNetworkByPassphrase, getActiveNetwork } from "./network";
 import {
@@ -1268,7 +1265,6 @@ export async function changeOfferPriceWithFreighter(publicKey, offer, newPrice) 
     offerId: String(offer.id),
   });
 
-
   const sourceAccount = await getServer().loadAccount(publicKey);
   const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: StellarSdk.BASE_FEE,
@@ -1746,32 +1742,6 @@ export async function preparePaymentWithFreighter(
 }
 
 /**
- * Convert builders array to CSV string.
- * Each builder has { address, name }.
- * Quotes fields containing commas or quotes.
- */
-export function toCsv(builders) {
-  if (!builders || builders.length === 0) {
-    return "address,name\nNo builders to export.\n";
-  }
-  const header = "address,name";
-  const rows = builders
-    .map((b) => {
-      const safeAddress = `"${b.address}"`;
-      const safeName =
-        b.name && (b.name.includes(",") || b.name.includes('"'))
-          ? `"${b.name.replace(/"/, '""')}"`
-          : b.name || "";
-      return `${safeAddress},${safeName}`;
-    })
-    .join("\n");
-  return `${header}\n${rows}\n`;
-}
-
-/**
- * Establish or raise a trustline for a credit asset on Testnet.
- * limit "0" removes the trustline (when balance is zero).
-
  * Build the one transaction that creates a sponsored account:
  * `beginSponsoringFutureReserves(newAccount)`, `createAccount(newAccount, 0)`,
  * then `endSponsoringFutureReserves()`.

@@ -9,7 +9,6 @@ import {
   pathPaymentWithFreighter,
   changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
-  toCsv,
   createClaimableBalanceWithFreighter,
   claimClaimableBalanceWithFreighter,
   readKitewellState,
@@ -62,6 +61,7 @@ import {
   PAYMENTS_CSV_FILENAME,
 } from "./stellar";
 import { downloadCsv } from "./csvExport";
+import { buildersToCsv } from "./builderCsv";
 import {
   clearStoredOrderBookPair,
   parseOrderBookPair,
@@ -273,8 +273,6 @@ export default function App() {
   const [signingConfirmationOpen, setSigningConfirmationOpen] = useState(false);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
-  const [builders, setBuilders] = useState([]);
-
   const [simulationFees, setSimulationFees] = useState(null);
   const [simulatedRegisterKey, setSimulatedRegisterKey] = useState(null);
   const [labState, setLabState] = useState(null);
@@ -357,7 +355,6 @@ export default function App() {
   const [labEventsError, setLabEventsError] = useState(null);
   const eventCursorRef = useRef(null);
   const eventStartLedgerRef = useRef(null);
-
 
   // Replay read: one shot from a chosen ledger, separate from the live tail.
   const [replayForm, setReplayForm] = useState("");
@@ -5296,7 +5293,26 @@ export default function App() {
                         "Refresh"
                       )}
                     </button>
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      disabled={!builderList}
+                      onClick={() =>
+                        downloadCsv(buildersToCsv(builderList?.rows), "builders.csv")
+                      }
+                      title="Download the builder page currently loaded"
+                    >
+                      Download CSV
+                    </button>
                   </div>
+                  {!builderList && (
+                    <p className="muted">Load the builder registry to export it.</p>
+                  )}
+                  {builderList && builderList.rows.length === 0 && (
+                    <p className="muted">
+                      No builders on this page — the export will contain only the header.
+                    </p>
+                  )}
                   {!configuredContractId && (
                     <p className="muted">
                       No contract id configured — no builders to list.
@@ -6769,42 +6785,6 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                </>
-              )}
-              {publicKey && (
-                <div className="section">
-                  <h2>Download Builders</h2>
-                  {labInfo && labInfo.network.contract
-                    ? builders.length > 0 ? (
-                      <button
-                        className="btn btn--secondary"
-                        type="button"
-                        onClick={() => {
-                          const csv = toCsv(builders);
-                          const blob = new Blob([csv], {
-                            type: "text/csv;charset=utf-8;",
-                          });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement("a");
-                          a.href = url;
-                          a.download = "builders.csv";
-                          a.click();
-                          URL.revokeObjectURL(url);
-                        }}
-                      >
-                        Download CSV
-                      </button>
-                    ) : (
-                      <p className="muted">No builders to export.</p>
-                    )
-                    : (
-                      <p className="muted">No contract instance loaded.</p>
-                    )}
-                </div>
-              )}
-              {!labInfo && !labError && (
-                <p className="muted">Open this tab to probe the backend.</p>
-
 
                   {decodedEnvelope.operations.map((operation, index) => (
                     <div key={`${operation.type}-${index}`} className="info-box">
@@ -6880,7 +6860,6 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-
               )}
             </div>
           )}
