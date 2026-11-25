@@ -516,12 +516,17 @@ export default function App() {
                   onClick={loadLabInfo}
                   disabled={loading === "lab"}
                 >
-                  {loading === "lab" ? (
-                    <>
-                      <Spinner /> Checking…
-                    </>
-                  ) : (
-                    "Refresh"
+                  {labInfo &&
+                  labInfo.network.contract?.status !== "archived"
+                    ? (loading === "lab" ? (
+                      <>
+                        <Spinner /> Checking…
+                        </>
+                      ) : (
+                        "Refresh"
+                      )
+                    ) : (
+                    "Archived — restore instance first"
                   )}
                 </button>
               </div>
@@ -555,7 +560,11 @@ export default function App() {
                         "Not deployed yet — see contracts/README.md"}
                     </code>
                     <p className="muted" style={{ marginTop: 6 }}>
-                      Status: {labInfo.network.contract?.status}
+                      {labInfo.network.contract?.status === "archived" ? (
+                        <span className="muted--dim">Archived</span>
+                      ) : (
+                        "Live"
+                      )}
                     </p>
                   </div>
                 </>
