@@ -9,6 +9,7 @@ import {
   NETWORKS,
 } from "./network";
 import { calculateMinimumBalance } from "./accountReserve";
+import { paymentMemoFields } from "./paymentMemo";
 
 /** Shown in the lab panel when Horizon asks the client to slow down. */
 export const HORIZON_SLOWDOWN_MESSAGE =
@@ -1061,7 +1062,8 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
       .payments()
       .forAccount(publicKey)
       .limit(limit)
-      .order("desc");
+      .order("desc")
+      .join("transactions");
     if (cursor) request = request.cursor(cursor);
     const payments = await request.call();
     const lastRaw = payments.records[payments.records.length - 1];
@@ -1079,6 +1081,7 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
           transaction_hash: p.transaction_hash,
           created_at: p.created_at,
           ...mapTransactionFee(p.transaction),
+          ...paymentMemoFields(p.transaction),
         })),
       nextCursor:
         payments.records.length < limit ? null : (lastRaw?.paging_token ?? null),

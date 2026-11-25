@@ -85,6 +85,7 @@ import { filterTransactionHistory } from "./txHistoryFilter";
 import { fetchHealth, fetchNetworkInfo } from "./api";
 import { decodeEnvelope, formatArgumentValue } from "./envelopeDecoder";
 import { formatSimulationFee } from "./simulationFees";
+import { mapPaymentMemo } from "./paymentMemo";
 import {
   NETWORKS,
   getActiveNetwork,
@@ -6271,6 +6272,7 @@ export default function App() {
                   {filteredTransactions.map((tx) => {
                     const isOutgoing = tx.from === publicKey;
                     const createdAt = formatCreatedAt(tx.created_at);
+                    const memo = mapPaymentMemo(tx);
                     return (
                       <div
                         key={tx.id}
@@ -6306,6 +6308,10 @@ export default function App() {
                         </a>
                         <div className="tx-item__fee muted">
                           {formatHistoryFee(tx)}
+                        </div>
+                        <div className="tx-item__memo">
+                          <span className="metadata-label">{memo.label}</span>
+                          <span className="tx-item__memo-value">{memo.value}</span>
                         </div>
                         {createdAt && (
                           <time
