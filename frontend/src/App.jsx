@@ -4,6 +4,7 @@ import {
   connectFreighterWallet,
   sendPaymentWithFreighter,
   changeTrustWithFreighter,
+  getBuilder,
 } from "./freighter";
 import {
   fundWithFriendbot,
@@ -29,6 +30,9 @@ export default function App() {
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
+  const [builderAddress, setBuilderAddress] = useState("");
+  const [builderName, setBuilderName] = useState("");
+  const [loadingBuilder, setLoadingBuilder] = useState(false);
 
   const showToast = (message, type = "success") => {
     setToast({ message, type });
@@ -40,6 +44,16 @@ export default function App() {
   useEffect(() => {
     checkFreighterInstalled().then(setFreighterInstalled);
   }, []);
+
+  useEffect(() => {
+    if (builderAddress) {
+      setLoadingBuilder(true);
+      getBuilder(builderAddress).then((builder) => {
+        setBuilderName(builder ? builder.name || "Registered" : "Not registered");
+        setLoadingBuilder(false);
+      });
+    }
+  }, [builderAddress]);
 
   const refreshBalances = useCallback(async () => {
     if (!publicKey) return;
@@ -161,6 +175,14 @@ export default function App() {
     } finally {
       setLoading("");
     }
+  };
+
+  const lookupBuilder = async () => {
+    if (!builderAddress) return showToast("Enter an address first.", "error");
+    setLoadingBuilder(true);
+    const builder = await getBuilder(builderAddress);
+    setBuilderName(builder ? builder.name || "Registered" : "Not registered");
+    setLoadingBuilder(false);
   };
 
   const requireWallet = !publicKey;
@@ -562,6 +584,47 @@ export default function App() {
               )}
               {!labInfo && !labError && (
                 <p className="muted">Open this tab to probe the backend.</p>
+              )}
+              {publicKey && (
+                <div className="section">
+                  <h2>Builder Lookup</h2>
+                  <div className="form">
+                    <label className="label">Address</label>
+                    <input
+                      className="input"
+                      type="text"
+                      value={builderAddress}
+                      onChange={(e) => setBuilderAddress(e.target.value)}
+                      placeholder="G..."
+                      maxLength=56
+                      required
+                    />
+                    <button
+                      className="btn btn--primary"
+                      type="button"
+                      onClick={lookupBuilder}
+                      disabled={loadingBuilder}
+                    >
+                      {loadingBuilder ? (
+                        <>
+                          <Spinner size={14} /> Looking up…
+                        </>
+                      ) : (
+                        "Lookup"
+                      )}
+                    </button>
+                  </div>
+                  {builderName !== "" && (
+                    <div className="info-box">
+                      <span className="eyebrow">Builder</span>
+                      {builderName !== "Not registered" ? (
+                        <code>{builderName}</code>
+                      ) : (
+                        <span className="muted">Not registered</span>
+                      )}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           )}

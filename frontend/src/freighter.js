@@ -6,6 +6,7 @@ import {
 } from "@stellar/freighter-api";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { HORIZON_URL } from "./stellar";
+import { API_BASE } from "./config";
 
 const server = new StellarSdk.Horizon.Server(HORIZON_URL);
 const NETWORK_PASSPHRASE = StellarSdk.Networks.TESTNET;
@@ -87,6 +88,24 @@ export async function sendPaymentWithFreighter(
 
   const transaction = txBuilder.setTimeout(180).build();
   return signAndSubmit(transaction, publicKey);
+}
+
+export async function getBuilder(address) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(address)) {
+    throw new Error("Address must be a valid Stellar public key (G…).");
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/builder/${address}`);
+    if (!res.ok) throw new Error("Builder fetch failed");
+    const data = await res.json();
+    return data.builder || null;
+  } catch {
+    // Fall back to Horizon lookup - check if address has a home_domain (registered builder)
+    const account = await server.loadAccount(address);
+    return account.home_domain
+      ? { name: account.home_domain, address }
+      : null;
+  }
 }
 
 /**
