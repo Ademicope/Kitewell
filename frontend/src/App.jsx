@@ -117,6 +117,12 @@ import {
   watchTransactionStatus,
 } from "./txStatusWatch";
 import { buildTransactionExplorerUrl } from "./explorerLink";
+import {
+  canCallContract,
+  contractStatusLabel,
+  resolveContractStatus,
+  rpcCallBlockReason,
+} from "./contractStatus";
 import "./App.css";
 
 const TABS = [
@@ -477,6 +483,14 @@ export default function App() {
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
   const selectedComposeAsset = balances.find((b) => b.key === composeForm.assetKey);
   const configuredContractId = labInfo?.network?.contract?.kitewell;
+  // The Lab must know whether the instance entry is live or archived before it
+  // offers an RPC call: an archived instance fails every invocation.
+  const contractStatus = resolveContractStatus({
+    contractId: configuredContractId,
+    state: labState,
+    error: labStateError,
+  });
+  const contractCallBlock = rpcCallBlockReason(contractStatus);
   const parsedBookPair = parseOrderBookPair(bookPair);
   const bookKey = JSON.stringify([networkId, bookPair.selling, bookPair.buying]);
   const currentBookResult = bookResult?.key === bookKey ? bookResult : null;
@@ -5195,6 +5209,14 @@ export default function App() {
                       )}
                     </button>
                   </div>
+                  <p className="muted" role="status">
+                    Contract instance: {contractStatusLabel(contractStatus)}
+                  </p>
+                  {contractCallBlock && (
+                    <div className="info-box info-box--warning">
+                      <p className="muted">{contractCallBlock}</p>
+                    </div>
+                  )}
                   {labState ? (
                     <div className="info-box">
                       <span className="eyebrow">Contract state</span>
@@ -5358,7 +5380,8 @@ export default function App() {
                         loading === "register" ||
                         loading === "simulate" ||
                         requireWallet ||
-                        !registerSimulationReady
+                        !registerSimulationReady ||
+                        !canCallContract(contractStatus)
                       }
                     >
                       {loading === "register" ? (
@@ -5376,7 +5399,8 @@ export default function App() {
                       disabled={
                         loading === "simulate" ||
                         loading === "register" ||
-                        requireWallet
+                        requireWallet ||
+                        !canCallContract(contractStatus)
                       }
                     >
                       {loading === "simulate" ? (
