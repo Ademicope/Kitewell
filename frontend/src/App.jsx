@@ -101,6 +101,7 @@ import { decodeTransactionEnvelope } from "./txInspector";
 import TransactionHashLookup from "./TransactionHashLookup";
 import SigningPassphraseConfirmation from "./SigningPassphraseConfirmation";
 import MultisigCosignPanel from "./MultisigCosignPanel";
+import LabAdminPanel from "./LabAdminPanel";
 import { completeWebAuthChallenge } from "./sep10WebAuth";
 import { loadIssuerCurrencyList } from "./issuerToml";
 import { createPaymentStreamController } from "./paymentStream";
@@ -2038,6 +2039,7 @@ export default function App() {
     // unaffected: classic payments only need the Horizon server, not the RPC.
     if (!rpcHealth.ok) {
       setLabState(null);
+      setAdminState(null);
       setLabStateError(
         rpcHealth.error ||
           `Soroban RPC unreachable (${rpcHealth.description}). ` +
@@ -2048,6 +2050,7 @@ export default function App() {
 
     setLoading("labstate");
     setLabStateError(null);
+    setAdminState(null);
     try {
       // Always read builder state
       const state = await readKitewellState(contractId, publicKey);
@@ -5204,75 +5207,16 @@ export default function App() {
                       Reads lab_name, builder_count, and get_builder via Soroban RPC.
                     </p>
                   )}
-                  {adminState && (
-                    <div className="info-box">
-                      <span className="eyebrow">Admin</span>
-                      <div style={{ marginBottom: 12 }}>
-                        <span className="metadata-label">Current admin</span>
-                        <code style={{ display: "block", marginTop: 4 }}>
-                          {adminState.admin ? shortenAddress(adminState.admin) : "Not initialized"}
-                        </code>
-                      </div>
-                      {adminState.pendingAdmin && (
-                        <div style={{ marginBottom: 12 }}>
-                          <span className="metadata-label">Pending admin</span>
-                          <code style={{ display: "block", marginTop: 4 }}>
-                            {shortenAddress(adminState.pendingAdmin)}
-                          </code>
-                        </div>
-                      )}
-                      {publicKey === adminState.admin && (
-                        <form onSubmit={handleProposeAdmin} style={{ marginTop: 12 }}>
-                          <label className="label" htmlFor="propose-admin-address">
-                            Propose successor admin
-                          </label>
-                          <input
-                            id="propose-admin-address"
-                            className="input"
-                            placeholder="G… address"
-                            value={proposeAdminForm.address}
-                            onChange={(e) =>
-                              setProposeAdminForm({ address: e.target.value })
-                            }
-                          />
-                          <button
-                            className="btn btn--primary"
-                            type="submit"
-                            disabled={loading === "propose-admin"}
-                          >
-                            {loading === "propose-admin" ? (
-                              <>
-                                <Spinner /> Proposing…
-                              </>
-                            ) : (
-                              "Propose admin"
-                            )}
-                          </button>
-                        </form>
-                      )}
-                      {publicKey === adminState.pendingAdmin && (
-                        <div style={{ marginTop: 12 }}>
-                          <p className="muted" style={{ marginBottom: 8 }}>
-                            You are the pending admin. Accept to become the live admin.
-                          </p>
-                          <button
-                            className="btn btn--primary"
-                            type="button"
-                            onClick={handleAcceptAdmin}
-                            disabled={loading === "accept-admin"}
-                          >
-                            {loading === "accept-admin" ? (
-                              <>
-                                <Spinner /> Accepting…
-                              </>
-                            ) : (
-                              "Accept admin"
-                            )}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  <LabAdminPanel
+                    adminState={adminState}
+                    publicKey={publicKey}
+                    proposeAdminForm={proposeAdminForm}
+                    setProposeAdminForm={setProposeAdminForm}
+                    onProposeAdmin={handleProposeAdmin}
+                    onAcceptAdmin={handleAcceptAdmin}
+                    loading={loading}
+                    Spinner={Spinner}
+                  />
                   {labStateError && (
                     <div className="info-box info-box--warning">
                       <span className="eyebrow">Contract state</span>
