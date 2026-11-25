@@ -72,6 +72,7 @@ import {
   PAYMENTS_CSV_FILENAME,
 } from "./stellar";
 import { downloadCsv } from "./csvExport";
+import { buildersToCsv } from "./builderCsv";
 import {
   clearStoredOrderBookPair,
   parseOrderBookPair,
@@ -5314,7 +5315,26 @@ export default function App() {
                         "Refresh"
                       )}
                     </button>
+                    <button
+                      className="btn btn--secondary"
+                      type="button"
+                      disabled={!builderList}
+                      onClick={() =>
+                        downloadCsv(buildersToCsv(builderList?.rows), "builders.csv")
+                      }
+                      title="Download the builder page currently loaded"
+                    >
+                      Download CSV
+                    </button>
                   </div>
+                  {!builderList && (
+                    <p className="muted">Load the builder registry to export it.</p>
+                  )}
+                  {builderList && builderList.rows.length === 0 && (
+                    <p className="muted">
+                      No builders on this page — the export will contain only the header.
+                    </p>
+                  )}
                   {!configuredContractId && (
                     <p className="muted">
                       No contract id configured — no builders to list.
