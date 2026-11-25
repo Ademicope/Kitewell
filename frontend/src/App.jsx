@@ -35,6 +35,7 @@ import {
   downloadFailedSubmitLog,
 } from "./failedSubmitLog";
 import { copyToClipboardResult } from "./copyToClipboardResult";
+import { TransactionSources } from "./TransactionSources";
 import { shortenAddress } from "./addressFormat";
 import {
   fundWithFriendbot,
@@ -90,7 +91,7 @@ import {
   getAvailableNetworks,
   isFriendbotAvailable,
   removeCustomNetwork,
-  saveCustomNetwork,
+  saveVerifiedCustomNetwork,
   setActiveNetwork,
 } from "./network";
 import { validateAssetCode } from "./validateAssetCode";
@@ -186,6 +187,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("Wallet");
   const [publicKey, setPublicKey] = useState(null);
   const [networkId, setNetworkId] = useState(getActiveNetworkId());
+  const [customNetworkChecking, setCustomNetworkChecking] = useState(false);
   const [customNetworkForm, setCustomNetworkForm] = useState({
     name: "",
     horizonUrl: "",
@@ -941,14 +943,18 @@ export default function App() {
     }
   };
 
-  const handleSaveCustomNetwork = (event) => {
+  const handleSaveCustomNetwork = async (event) => {
     event.preventDefault();
+    setCustomNetworkChecking(true);
     try {
-      const network = saveCustomNetwork(customNetworkForm);
+      // The Horizon root must answer like Horizon before anything is saved.
+      const network = await saveVerifiedCustomNetwork(customNetworkForm);
       handleNetworkChange(network.id);
       showToast(`Saved and selected ${network.label}.`, "info");
     } catch (error) {
       showToast(error.message || "Could not save custom network.", "error");
+    } finally {
+      setCustomNetworkChecking(false);
     }
   };
 
@@ -3021,8 +3027,12 @@ export default function App() {
                 required
               />
               <div className="section__row">
-                <button className="btn btn--secondary btn--sm" type="submit">
-                  Save custom network
+                <button
+                  className="btn btn--secondary btn--sm"
+                  type="submit"
+                  disabled={customNetworkChecking}
+                >
+                  {customNetworkChecking ? "Checking Horizon…" : "Save custom network"}
                 </button>
                 {getAvailableNetworks().some((network) => network.id === "CUSTOM") && (
                   <button
@@ -6386,52 +6396,29 @@ export default function App() {
               </p>
               {filteredTransactions.length > 0 ? (
                 <div className="tx-list">
-                  {filteredTransactions.map((tx) => {
-                    const isOutgoing = tx.from === publicKey;
-                    const createdAt = formatCreatedAt(tx.created_at);
-                    return (
-                      <div
-                        key={tx.id}
-                        className={`tx-item tx-item--selectable ${isOutgoing ? "tx-item--out" : "tx-item--in"}`}
-                        onClick={() => setSelectedTxHash(tx.transaction_hash)}
-                      >
-                        <div className="tx-item__direction">
-                          {isOutgoing ? "Sent" : "Received"}
-                          <button
-                            className="tx-item__details-btn"
-                            type="button"
-                            aria-pressed={selectedTxHash === tx.transaction_hash}
-                          >
-                            Details
-                          </button>
-                        </div>
-                        <div className="tx-item__amount">
-                          {parseFloat(tx.amount).toLocaleString()} {tx.asset_code || "XLM"}
-                        </div>
-                        <div className="tx-item__addr muted">
-                          {isOutgoing
-                            ? `To ${shortenAddress(tx.to)}`
-                            : `From ${shortenAddress(tx.from)}`}
-                        </div>
-                        <a
-                          href={explorerTxUrl(tx.transaction_hash)}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="tx-item__link"
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          Explorer ↗
-                        </a>
-                        <div className="tx-item__fee muted">
-                          {formatHistoryFee(tx)}
-                        </div>
-                        {createdAt && (
-                          <time
-                            className="tx-item__time"
-                            dateTime={tx.created_at}
+                  {groupPaymentsByDay(filteredTransactions).map((group) => (
+                    <section key={group.day ?? "unknown"} className="tx-day">
+                      <h3 className="tx-day__heading">
+                        {group.day ?? "Unknown"} ({group.records.length})
+                      </h3>
+                      {group.records.map((tx) => {
+                        const isOutgoing = tx.from === publicKey;
+                        const createdAt = formatCreatedAt(tx.created_at);
+                        return (
+                          <div
+                            key={tx.id}
+                            className={`tx-item tx-item--selectable ${isOutgoing ? "tx-item--out" : "tx-item--in"}`}
+                            onClick={() => setSelectedTxHash(tx.transaction_hash)}
                           >
                             <div className="tx-item__direction">
                               {isOutgoing ? "Sent" : "Received"}
+                              <button
+                                className="tx-item__details-btn"
+                                type="button"
+                                aria-pressed={selectedTxHash === tx.transaction_hash}
+                              >
+                                Details
+                              </button>
                             </div>
                             <div className="tx-item__amount">
                               {parseFloat(tx.amount).toLocaleString()} {tx.asset_code || "XLM"}
@@ -6446,9 +6433,14 @@ export default function App() {
                               target="_blank"
                               rel="noreferrer"
                               className="tx-item__link"
+                              onClick={(event) => event.stopPropagation()}
                             >
                               Explorer ↗
                             </a>
+                            <TransactionSources tx={tx} />
+                            <div className="tx-item__fee muted">
+                              {formatHistoryFee(tx)}
+                            </div>
                             {createdAt && (
                               <time
                                 className="tx-item__time"

@@ -3,8 +3,8 @@ import cors from "cors";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { mapBalances } from "./mapBalances.js";
 import { createRateLimiter } from "./rateLimit.js";
-import { resolveNetwork } from "./networkConfig.js";
-import { mapTransactionFee } from "./transactionFee.js";
+import { resolveNetwork, resolveRequestNetwork } from "./networkConfig.js";
+import { mapTransactionFee, mapTransactionSources } from "./transactionFee.js";
 
 /**
  * Build the Kitewell Express app.
@@ -165,7 +165,7 @@ export function createApp({ horizon, env = process.env } = {}) {
         dataEntries: Object.entries(account.data_attr || {})
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([name, value]) => ({ name, value })),
-        explorerUrl: `${EXPLORER_BASE}/account/${address}`,
+        explorerUrl: `${network.explorerBase}/account/${address}`,
       });
     } catch (err) {
       const status = err?.response?.status || 404;
@@ -217,7 +217,8 @@ export function createApp({ horizon, env = process.env } = {}) {
           transaction_hash: p.transaction_hash,
           created_at: p.created_at,
           ...mapTransactionFee(p.transaction),
-          explorerUrl: `${EXPLORER_BASE}/tx/${p.transaction_hash}`,
+          ...mapTransactionSources(p.transaction),
+          explorerUrl: `${network.explorerBase}/tx/${p.transaction_hash}`,
         }));
 
       // A full page of raw records means there may be older ones; the cursor

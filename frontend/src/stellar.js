@@ -9,7 +9,7 @@ import {
   NETWORKS,
 } from "./network";
 import { calculateMinimumBalance } from "./accountReserve";
-import { mapTransactionFee } from "./historyFee";
+import { mapTransactionFee, mapTransactionSources } from "./historyFee";
 import { Buffer } from "buffer";
 
 /** Shown in the lab panel when Horizon asks the client to slow down. */
@@ -203,9 +203,9 @@ export async function getLatestLedger(networkId = getActiveNetworkId()) {
   };
 }
 
-/** The Kitewell backend is configured for Testnet, so skip it elsewhere. */
+/** The backend serves the built-in networks; a custom network reads Horizon directly. */
 function backendIsUsable() {
-  return getActiveNetworkId() === "TESTNET";
+  return getActiveNetworkId() !== "CUSTOM";
 }
 
 export function explorerAccountUrl(publicKey) {
@@ -387,7 +387,7 @@ export async function getAccountMergeBlockers(publicKey) {
   let account;
   if (backendIsUsable()) {
     try {
-      account = await fetchAccountViaApi(publicKey);
+      account = await fetchAccountViaApi(publicKey, getActiveNetworkId());
     } catch {
       account = await getServer().loadAccount(publicKey);
     }
@@ -869,7 +869,7 @@ export async function getSponsoredClaimableBalances(publicKey) {
 export async function getAccountBalances(publicKey, options = {}) {
   if (backendIsUsable()) {
     try {
-      const data = await fetchAccountViaApi(publicKey);
+      const data = await fetchAccountViaApi(publicKey, getActiveNetworkId());
       return data.balances;
     } catch {
       /* fall back to direct Horizon */
@@ -885,7 +885,7 @@ export async function getAccountBalances(publicKey, options = {}) {
 export async function getAccountDetails(publicKey) {
   if (backendIsUsable()) {
     try {
-      return await fetchAccountViaApi(publicKey);
+      return await fetchAccountViaApi(publicKey, getActiveNetworkId());
     } catch {
       /* fall back to direct Horizon */
     }
@@ -1125,9 +1125,10 @@ export function liquidityPoolWithdraw(poolId, amount, minAmountA, minAmountB) {
 export async function getTransactions(publicKey, limit = 15, cursor, options = {}) {
   if (backendIsUsable()) {
     try {
+      const network = getActiveNetworkId();
       return options.signal
-        ? await fetchPaymentsViaApi(publicKey, limit, cursor, options)
-        : await fetchPaymentsViaApi(publicKey, limit, cursor);
+        ? await fetchPaymentsViaApi(publicKey, limit, cursor, network, options)
+        : await fetchPaymentsViaApi(publicKey, limit, cursor, network);
     } catch {
       /* fall back to direct Horizon */
     }
@@ -1138,7 +1139,9 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
       .payments()
       .forAccount(publicKey)
       .limit(limit)
-      .order("desc");
+      .order("desc")
+      // Embeds each payment's transaction: its fee, operation count and sources.
+      .join("transactions");
     if (cursor) request = request.cursor(cursor);
     const payments = await request.call();
     const lastRaw = payments.records[payments.records.length - 1];
@@ -1156,6 +1159,7 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
           transaction_hash: p.transaction_hash,
           created_at: p.created_at,
           ...mapTransactionFee(p.transaction),
+          ...mapTransactionSources(p.transaction),
         })),
       nextCursor:
         payments.records.length < limit ? null : (lastRaw?.paging_token ?? null),

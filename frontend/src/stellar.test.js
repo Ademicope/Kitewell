@@ -641,6 +641,8 @@ describe("getTransactions", () => {
           fee_charged: null,
           operation_count: null,
           fee_bumped: false,
+          source_account: null,
+          fee_account: null,
         },
       ],
       // Paging straight off Horizon is out of scope, so this path ends here.

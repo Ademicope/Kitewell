@@ -732,6 +732,21 @@ body {
   grid-column: 1 / -1;
   font-size: 11px;
 }
+.tx-item__sources {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.tx-item__copy {
+  font: inherit;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--info);
+  cursor: pointer;
+}
 .tx-item__link {
   font-size: 11px;
   color: var(--info);
