@@ -90,6 +90,11 @@ import {
 import { validatePaymentAmount } from "./validatePaymentAmount";
 import { filterTransactionHistory } from "./txHistoryFilter";
 import { fetchHealth, fetchNetworkInfo } from "./api";
+import {
+  describeEndSponsorship,
+  endSponsorshipWithFreighter,
+  hasEndSponsorshipAction,
+} from "./sponsorshipRevoke";
 import { decodeEnvelope, formatArgumentValue } from "./envelopeDecoder";
 import { formatSimulationFee } from "./simulationFees";
 import { mapPaymentMemo } from "./paymentMemo";
@@ -405,6 +410,15 @@ export default function App() {
   });
   const [sponsorDraft, setSponsorDraft] = useState(null);
   const [sponsorResult, setSponsorResult] = useState(null);
+
+  // Issue #668: ending one sponsorship from the list.
+  const [endSponsorForm, setEndSponsorForm] = useState({
+    sponsoredAccount: "",
+    assetCode: "",
+    assetIssuer: "",
+  });
+  const [endSponsorConfirmation, setEndSponsorConfirmation] = useState(null);
+  const [endSponsorResult, setEndSponsorResult] = useState(null);
 
   // One offer watch at a time; aborting the controller only stops polling.
   const [offerWatchId, setOfferWatchId] = useState("");
@@ -2529,6 +2543,49 @@ export default function App() {
     } catch (err) {
       trackFailedSubmit("sponsorAccount", err);
       showToast(err.message || "Sponsored account creation failed.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  // Issue #668: the confirmation names the sponsored account and the entry,
+  // and only then does Freighter open. Cancelling signs nothing.
+  const handleReviewEndSponsorship = (event) => {
+    event.preventDefault();
+    const row = { entryType: "trustline", ...endSponsorForm };
+    const confirmation = describeEndSponsorship(row);
+    setEndSponsorResult(null);
+    if (!confirmation) {
+      setEndSponsorConfirmation(null);
+      return showToast(
+        "This sponsorship entry cannot be identified, so it cannot be ended.",
+        "error"
+      );
+    }
+    setEndSponsorConfirmation({ ...confirmation, row });
+  };
+
+  const handleEndSponsorship = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    if (!endSponsorConfirmation) return;
+
+    setLoading("end-sponsorship");
+    try {
+      const result = await endSponsorshipWithFreighter(
+        publicKey,
+        endSponsorConfirmation.row
+      );
+      setEndSponsorResult(result);
+      setEndSponsorConfirmation(null);
+      setEndSponsorForm({
+        sponsoredAccount: "",
+        assetCode: "",
+        assetIssuer: "",
+      });
+      showToast(`Sponsorship ended · ${result.hash.slice(0, 12)}…`, "success");
+    } catch (err) {
+      trackFailedSubmit("endSponsorship", err);
+      showToast(err.message || "Ending the sponsorship failed.", "error");
     } finally {
       setLoading("");
     }
@@ -5670,6 +5727,144 @@ export default function App() {
                       <code>{sponsorResult.hash}</code>
                       <a
                         href={explorerTxUrl(sponsorResult.hash)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-link"
+                      >
+                        Explorer ↗
+                      </a>
+                    </div>
+                  )}
+
+                  <div className="subhead">End a sponsorship</div>
+                  <p className="muted">
+                    Ends one entry from the sponsorship list with a single
+                    revoke-sponsorship operation. Nothing is signed until the
+                    confirmation below is accepted.
+                  </p>
+                  <form className="form" onSubmit={handleReviewEndSponsorship}>
+                    <label className="label" htmlFor="end-sponsor-account">
+                      Sponsored account
+                    </label>
+                    <input
+                      id="end-sponsor-account"
+                      className="input"
+                      type="text"
+                      placeholder="G…"
+                      value={endSponsorForm.sponsoredAccount}
+                      onChange={(e) => {
+                        setEndSponsorForm({
+                          ...endSponsorForm,
+                          sponsoredAccount: e.target.value,
+                        });
+                        setEndSponsorConfirmation(null);
+                      }}
+                    />
+                    <label className="label" htmlFor="end-sponsor-code">
+                      Asset code
+                    </label>
+                    <input
+                      id="end-sponsor-code"
+                      className="input"
+                      type="text"
+                      placeholder="USDC"
+                      maxLength={12}
+                      value={endSponsorForm.assetCode}
+                      onChange={(e) => {
+                        setEndSponsorForm({
+                          ...endSponsorForm,
+                          assetCode: e.target.value,
+                        });
+                        setEndSponsorConfirmation(null);
+                      }}
+                    />
+                    <label className="label" htmlFor="end-sponsor-issuer">
+                      Asset issuer
+                    </label>
+                    <input
+                      id="end-sponsor-issuer"
+                      className="input"
+                      type="text"
+                      placeholder="G…"
+                      value={endSponsorForm.assetIssuer}
+                      onChange={(e) => {
+                        setEndSponsorForm({
+                          ...endSponsorForm,
+                          assetIssuer: e.target.value,
+                        });
+                        setEndSponsorConfirmation(null);
+                      }}
+                    />
+                    <button
+                      className="btn btn--secondary"
+                      type="submit"
+                      disabled={
+                        loading === "end-sponsorship" ||
+                        requireWallet ||
+                        !hasEndSponsorshipAction({
+                          entryType: "trustline",
+                          ...endSponsorForm,
+                        })
+                      }
+                    >
+                      Review
+                    </button>
+                  </form>
+                  {endSponsorConfirmation && (
+                    <div className="info-box info-box--warning">
+                      <span className="eyebrow">Confirm end sponsorship</span>
+                      <p className="muted">{endSponsorConfirmation.message}</p>
+                      <div className="metadata-grid">
+                        <div>
+                          <span className="metadata-label">
+                            Sponsored account
+                          </span>
+                          <span className="metadata-value">
+                            {endSponsorConfirmation.sponsoredAccount}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="metadata-label">Entry</span>
+                          <span className="metadata-value">
+                            {endSponsorConfirmation.entryLabel}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="section__row">
+                        <button
+                          className="btn btn--secondary"
+                          type="button"
+                          onClick={() => setEndSponsorConfirmation(null)}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          className="btn btn--primary"
+                          type="button"
+                          onClick={handleEndSponsorship}
+                          disabled={loading === "end-sponsorship"}
+                        >
+                          {loading === "end-sponsorship" ? (
+                            <>
+                              <Spinner /> Signing in Freighter…
+                            </>
+                          ) : (
+                            "Sign & end sponsorship"
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {endSponsorResult && (
+                    <div className="info-box">
+                      <span className="eyebrow">Sponsorship ended</span>
+                      <p className="muted">
+                        {endSponsorResult.entryLabel} held by{" "}
+                        {endSponsorResult.sponsoredAccount}
+                      </p>
+                      <code>{endSponsorResult.hash}</code>
+                      <a
+                        href={explorerTxUrl(endSponsorResult.hash)}
                         target="_blank"
                         rel="noreferrer"
                         className="text-link"
