@@ -11,6 +11,8 @@ import {
   changeTrustWithFreighter,
   createClaimableBalanceWithFreighter,
   claimClaimableBalanceWithFreighter,
+  clawbackClaimableBalanceWithFreighter,
+  clawbackWithFreighter,
   readKitewellState,
   registerBuilderWithFreighter,
   readAdminState,
@@ -43,7 +45,10 @@ import {
   getAccountDetails,
   getOpenOffers,
   getPendingTransactions,
-  getClaimableBalances,
+  getSponsoredClaimableBalances,
+  getAccountTrades,
+  isHorizonSlowdownError,
+  HORIZON_SLOWDOWN_MESSAGE,
   getLiquidityPool,
   liquidityPoolDeposit,
   liquidityPoolWithdraw,
@@ -207,6 +212,8 @@ export default function App() {
   });
   const [transactions, setTransactions] = useState([]);
   const [pendingTransactions, setPendingTransactions] = useState([]);
+  const [trades, setTrades] = useState([]);
+  const [tradesNextCursor, setTradesNextCursor] = useState(null);
   const [pendingError, setPendingError] = useState(null);
   const [nextCursor, setNextCursor] = useState(null);
   const [pageCursors, setPageCursors] = useState([null]);
@@ -235,6 +242,9 @@ export default function App() {
       ...changes,
     }));
     setSendPrepared(null);
+    // Any edit changes the operation list, so the previewed envelope is stale.
+    setUnsignedEnvelope(null);
+    setSigningConfirmationOpen(false);
   };
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [createAccountForm, setCreateAccountForm] = useState({
@@ -292,6 +302,12 @@ export default function App() {
   const tabRefs = useRef([]);
   const horizonAbortRef = useRef(null);
   const [accountDetails, setAccountDetails] = useState(null);
+  const [clawbackAssets, setClawbackAssets] = useState([]);
+  const [clawbackForm, setClawbackForm] = useState({
+    assetKey: "",
+    holder: "",
+    amount: "",
+  });
   const [claimableForm, setClaimableForm] = useState({
     claimant: "",
     amount: "",
@@ -299,7 +315,6 @@ export default function App() {
     predicateMode: "unconditional",
     ledgerTime: "",
   });
-  const [claimableBalances, setClaimableBalances] = useState([]);
   const [claimableResult, setClaimableResult] = useState(null);
   const [failedSubmits, setFailedSubmits] = useState([]);
   const failedSubmitLogRef = useRef(createFailedSubmitLog());
@@ -373,7 +388,7 @@ export default function App() {
   const [sponsorResult, setSponsorResult] = useState(null);
 
   // One offer watch at a time; aborting the controller only stops polling.
-  const [offerForm, setOfferForm] = useState("");
+  const [offerWatchId, setOfferWatchId] = useState("");
   const [offerWatch, setOfferWatch] = useState(null);
   const [offerWatchError, setOfferWatchError] = useState(null);
   const offerWatchRef = useRef(null);
@@ -449,14 +464,8 @@ export default function App() {
     setPathForm((prev) => ({ ...prev, ...changes }));
     // Editing the request invalidates any quote from the previous form state.
     setPathQuote(null);
-  const updatePathForm = (changes) => setPathForm((prev) => ({ ...prev, ...changes }));
-  const updateOfferForm = (changes) => setOfferForm((prev) => ({ ...prev, ...changes }));
-  // Any edit changes the operation list, so the previewed envelope is stale.
-  const updateSendForm = (changes) => {
-    setSendForm((prev) => ({ ...prev, ...changes }));
-    setUnsignedEnvelope(null);
-    setSigningConfirmationOpen(false);
   };
+  const updateOfferForm = (changes) => setOfferForm((prev) => ({ ...prev, ...changes }));
   const selectedSendAsset = balances.find((b) => b.key === sendForm.assetKey);
   const selectedComposeAsset = balances.find((b) => b.key === composeForm.assetKey);
   const configuredContractId = labInfo?.network?.contract?.kitewell;
@@ -572,7 +581,7 @@ export default function App() {
       const next = await getAccountBalances(publicKey, { signal });
       setBalances(next);
       setHorizonNotice(null);
-      const claimables = await getClaimableBalances(publicKey).catch(() => []);
+      const claimables = await getSponsoredClaimableBalances(publicKey).catch(() => []);
       setClaimableBalances(claimables);
       try {
         const details = await getAccountDetails(publicKey, { signal });
@@ -591,12 +600,12 @@ export default function App() {
         if (isHorizonSlowdownError(detailsError)) {
           setHorizonNotice(HORIZON_SLOWDOWN_MESSAGE);
           showToast(HORIZON_SLOWDOWN_MESSAGE, "info");
+        } else {
+          setAccountDetails(null);
         }
-      } catch {
-        setAccountDetails(null);
       }
       await refreshReserve();
-    } catch {
+    } catch (error) {
       setBalances([]);
       setClaimableBalances([]);
       if (isHorizonSlowdownError(error)) {
@@ -611,12 +620,12 @@ export default function App() {
     }
   }, [activeNetwork, publicKey]);
 
-  const handleClawback = async (balance) => {
+  const handleClawbackClaimable = async (balance) => {
     if (!publicKey) return showToast("Connect Freighter first.", "error");
     setLoading(`clawback-${balance.id}`);
     try {
       await clawbackClaimableBalanceWithFreighter(publicKey, balance.id);
-      const next = await getClaimableBalances(publicKey).catch(() => []);
+      const next = await getSponsoredClaimableBalances(publicKey).catch(() => []);
       setClaimableBalances(next);
       showToast(`${balance.code} claimable balance clawed back.`);
     } catch (err) {
@@ -641,46 +650,6 @@ export default function App() {
     if (!publicKey) return showToast("Connect Freighter first.", "error");
     if (!dataForm.name) return showToast("Data name is required.", "error");
 
-    setLoading("data-set");
-    try {
-      await manageDataWithFreighter(publicKey, dataForm.name, dataForm.value);
-      setDataForm({ name: "", value: "" });
-      await refreshAccountDetails();
-      showToast("Account data submitted.");
-    } catch (err) {
-      showToast(err.message || "Could not set account data.", "error");
-    } finally {
-      setLoading("");
-    }
-  };
-
-  const handleClearData = async (name) => {
-    if (!publicKey) return showToast("Connect Freighter first.", "error");
-    setLoading(`data-clear-${name}`);
-    try {
-      await manageDataWithFreighter(publicKey, name, null);
-      await refreshAccountDetails();
-      showToast(`Cleared account data "${name}".`);
-    } catch (err) {
-      showToast(err.message || `Could not clear "${name}".`, "error");
-    } finally {
-      setLoading("");
-    }
-  };
-
-  const refreshAccountDetails = async () => {
-    if (!publicKey) return;
-    try {
-      setAccountDetails(await getAccountDetails(publicKey));
-    } catch {
-      setAccountDetails(null);
-    }
-  };
-
-  const handleSetData = async (e) => {
-    e.preventDefault();
-    if (!publicKey) return showToast("Connect Freighter first.", "error");
-    if (!dataForm.name) return showToast("Data name is required.", "error");
     setLoading("data-set");
     try {
       await manageDataWithFreighter(publicKey, dataForm.name, dataForm.value);
@@ -739,7 +708,7 @@ export default function App() {
     if (!publicKey) return;
     setLoading("claimable-list");
     try {
-      setClaimableBalances(await getClaimableBalances(publicKey));
+      setClaimableBalances(await getSponsoredClaimableBalances(publicKey));
     } catch (err) {
       setClaimableBalances([]);
       showToast(err.message || "Could not load claimable balances.", "error");
@@ -946,6 +915,38 @@ export default function App() {
     setNetworkId(network.id);
     setCustomNetworkForm({ name: "", horizonUrl: "", rpcUrl: "", passphrase: "" });
     showToast("Custom network removed. Switched to Testnet.", "info");
+  };
+
+  const loadTrades = async (cursor) => {
+    const page = await getAccountTrades(publicKey, cursor ? { cursor } : {});
+    setTrades((previous) => (cursor ? [...previous, ...page.records] : page.records));
+    setTradesNextCursor(page.nextCursor);
+  };
+
+  const handleTrades = async () => {
+    if (!publicKey) return showToast("Connect Freighter first.", "error");
+    setLoading("trades");
+    try {
+      await loadTrades();
+    } catch (err) {
+      setTrades([]);
+      setTradesNextCursor(null);
+      showToast(err.message || "Could not load trades.", "error");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const handleLoadMoreTrades = async () => {
+    if (!publicKey || !tradesNextCursor) return;
+    setLoading("trades-more");
+    try {
+      await loadTrades(tradesNextCursor);
+    } catch (err) {
+      showToast(err.message || "Could not load more trades.", "error");
+    } finally {
+      setLoading("");
+    }
   };
 
   const refreshPending = useCallback(async () => {
@@ -2486,7 +2487,7 @@ export default function App() {
     setOfferWatchError(null);
     stopOfferWatch();
 
-    const offerId = offerForm.trim();
+    const offerId = offerWatchId.trim();
     const controller = new AbortController();
     const token = offerWatchTokenRef.current + 1;
     offerWatchTokenRef.current = token;
@@ -2734,6 +2735,21 @@ export default function App() {
     }
   };
 
+  const refreshClawbackAssets = async () => {
+    if (!publicKey) {
+      setClawbackAssets([]);
+      return;
+    }
+    try {
+      const next = await getAccountBalances(publicKey);
+      setClawbackAssets(
+        next.filter((balance) => !balance.isNative && balance.issuer === publicKey)
+      );
+    } catch {
+      setClawbackAssets([]);
+    }
+  };
+
   const activateTab = (tab) => {
     setActiveTab(tab);
     if (tab === "Fees") loadFeeStats();
@@ -2823,18 +2839,6 @@ export default function App() {
     } catch (error) {
       setSep7Request(null);
       showToast(error.message || "Invalid SEP-7 pay URI.", "error");
-    }
-  };
-
-  const activateTab = (tab) => {
-    setActiveTab(tab);
-    if (tab === "History") handleHistory();
-    if (tab === "Lab") {
-      loadLabInfo();
-      refreshLabState();
-    }
-    if ((tab === "Wallet" || tab === "Assets" || tab === "Send") && publicKey) {
-      refreshBalances();
     }
   };
 
@@ -3543,7 +3547,7 @@ export default function App() {
                           <button
                             className="btn btn--secondary btn--sm"
                             type="button"
-                            onClick={() => handleClawback(balance)}
+                            onClick={() => handleClawbackClaimable(balance)}
                             disabled={loading === `clawback-${balance.id}`}
                           >
                             {loading === `clawback-${balance.id}` ? "Clawing back…" : "Claw back"}
@@ -4861,8 +4865,8 @@ export default function App() {
                   inputMode="numeric"
                   pattern="[0-9]+"
                   placeholder="e.g. 123456789"
-                  value={offerForm}
-                  onChange={(e) => setOfferForm(e.target.value)}
+                  value={offerWatchId}
+                  onChange={(e) => setOfferWatchId(e.target.value)}
                   required
                 />
                 <p className="muted">
@@ -5979,17 +5983,18 @@ export default function App() {
                     )}
                     <div className="section__row">
                       <button
-        type="submit"
-        disabled={loading === "setoptions" || requireWallet}
-      >
-        {loading === "setoptions" ? (
-          <>
-            <Spinner /> Signing in Freighter…
-          </>
-        ) : (
-          "Submit setOptions"
-        )}
-      </button>
+                        className="btn btn--primary"
+                        type="submit"
+                        disabled={loading === "setoptions" || requireWallet}
+                      >
+                        {loading === "setoptions" ? (
+                          <>
+                            <Spinner /> Signing in Freighter…
+                          </>
+                        ) : (
+                          "Submit setOptions"
+                        )}
+                      </button>
                     </div>
                   </form>
                 )}
@@ -5997,9 +6002,9 @@ export default function App() {
                   <div className="warning-box">
                     <span className="eyebrow">Warning</span>
                     <p className="muted">
-                      {mediumThreshold > (signers.reduce((sum, w) => sum + (w.weight ?? 0), 0) || 0)
-                        ? "Medium threshold exceeds total signer weights!"
-                        : ""}
+                      {medThreshold > (signers.reduce((sum, signer) => sum + (signerWeights[signers.indexOf(signer)] ?? 0), 0) || 0)
+                        ? "Medium threshold exceeds total signer weights."
+                        : "Thresholds are covered by the current signer weights."}
                     </p>
                   </div>
                 )}
@@ -6008,7 +6013,6 @@ export default function App() {
               {!labInfo && !labError && (
                 <p className="muted">Open this tab to probe the backend.</p>
               )}
-              <div className="info-box">
               <div className="info-box">
                 <span className="eyebrow">Failed submits</span>
                 <p className="muted">
@@ -6039,22 +6043,8 @@ export default function App() {
                   type="button"
                   onClick={handleHistory}
                   disabled={loading === "history" || requireWallet}
-
-                <span className="eyebrow">Failed submits</span>
-                <p className="muted">
-                  {failedSubmits.length === 0
-                    ? "No failed submits this session yet."
-                    : `${failedSubmits.length} failed submission${
-                        failedSubmits.length === 1 ? "" : "s"
-                      } this session. Cleared on disconnect or reload — not stored in localStorage.`}
-                </p>
-                <button
-                  className="btn btn--secondary"
-                  type="button"
-                  onClick={handleDownloadFailedSubmits}
-                  disabled={failedSubmits.length === 0}
                 >
-                  Download failed JSON
+                  {loading === "history" ? "Loading…" : "Refresh"}
                 </button>
               </div>
 
@@ -6378,38 +6368,12 @@ export default function App() {
                             className="tx-item__time"
                             dateTime={tx.created_at}
                           >
-                            <div className="tx-item__direction">
-                              {isOutgoing ? "Sent" : "Received"}
-                            </div>
-                            <div className="tx-item__amount">
-                              {parseFloat(tx.amount).toLocaleString()} {tx.asset_code || "XLM"}
-                            </div>
-                            <div className="tx-item__addr muted">
-                              {isOutgoing
-                                ? `To ${shortenAddress(tx.to)}`
-                                : `From ${shortenAddress(tx.from)}`}
-                            </div>
-                            <a
-                              href={explorerTxUrl(tx.transaction_hash)}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="tx-item__link"
-                            >
-                              Explorer ↗
-                            </a>
-                            {createdAt && (
-                              <time
-                                className="tx-item__time"
-                                dateTime={tx.created_at}
-                              >
-                                {createdAt}
-                              </time>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </section>
-                  ))}
+                            {createdAt}
+                          </time>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 !loading && (
