@@ -6,6 +6,7 @@ import {
 } from "@stellar/freighter-api";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { HORIZON_URL } from "./stellar";
+import { API_BASE } from "./config";
 
 const server = new StellarSdk.Horizon.Server(HORIZON_URL);
 const NETWORK_PASSPHRASE = StellarSdk.Networks.TESTNET;
@@ -87,6 +88,29 @@ export async function sendPaymentWithFreighter(
 
   const transaction = txBuilder.setTimeout(180).build();
   return signAndSubmit(transaction, publicKey);
+}
+
+/**
+ * Convert builders array to CSV string.
+ * Each builder has { address, name }.
+ * Quotes fields containing commas or quotes.
+ */
+export function toCsv(builders) {
+  if (!builders || builders.length === 0) {
+    return "address,name\nNo builders to export.\n";
+  }
+  const header = "address,name";
+  const rows = builders
+    .map((b) => {
+      const safeAddress = `"${b.address}"`;
+      const safeName =
+        b.name && (b.name.includes(",") || b.name.includes('"'))
+          ? `"${b.name.replace(/"/, '""')}"`
+          : b.name || "";
+      return `${safeAddress},${safeName}`;
+    })
+    .join("\n");
+  return `${header}\n${rows}\n`;
 }
 
 /**

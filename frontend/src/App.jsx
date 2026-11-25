@@ -4,6 +4,7 @@ import {
   connectFreighterWallet,
   sendPaymentWithFreighter,
   changeTrustWithFreighter,
+  toCsv,
 } from "./freighter";
 import {
   fundWithFriendbot,
@@ -29,6 +30,7 @@ export default function App() {
   const [trustForm, setTrustForm] = useState({ code: "", issuer: "", limit: "1000000" });
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
+  const [builders, setBuilders] = useState([]);
 
   const showToast = (message, type = "success") => {
     setToast({ message, type });
@@ -559,6 +561,37 @@ export default function App() {
                     </p>
                   </div>
                 </>
+              )}
+              {publicKey && (
+                <div className="section">
+                  <h2>Download Builders</h2>
+                  {labInfo && labInfo.network.contract
+                    ? builders.length > 0 ? (
+                      <button
+                        className="btn btn--secondary"
+                        type="button"
+                        onClick={() => {
+                          const csv = toCsv(builders);
+                          const blob = new Blob([csv], {
+                            type: "text/csv;charset=utf-8;",
+                          });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = "builders.csv";
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                      >
+                        Download CSV
+                      </button>
+                    ) : (
+                      <p className="muted">No builders to export.</p>
+                    )
+                    : (
+                      <p className="muted">No contract instance loaded.</p>
+                    )}
+                </div>
               )}
               {!labInfo && !labError && (
                 <p className="muted">Open this tab to probe the backend.</p>
