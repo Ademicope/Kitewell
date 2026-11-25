@@ -23,6 +23,7 @@ import {
 import { parseHorizonError } from "./horizonErrorParse";
 import { formatTrustlineLimit } from "./trustlineLimitFormat";
 import { parseSimulationFees } from "./simulationFees";
+import { pageBuilderAddresses } from "./builderDirectory";
 import { getFeePerOperation } from "./feeSetting";
 import {
   HORIZON_FAILURE_CODE,
@@ -269,8 +270,7 @@ export const BUILDER_PAGE_SIZE = 10;
  * each address's nickname.
  *
  * The list function is a read-only simulation, so nothing is signed or
- * submitted. A start past the end comes back as an empty page with
- * `nextStart: null` instead of an error.
+ * submitted. One extra address detects the final page without an empty request.
  *
  * @param {string} contractId Kitewell contract (C…)
  * @param {{ start?: number, limit?: number }} [options]
@@ -291,8 +291,8 @@ export async function listKitewellBuilders(
   if (!Number.isSafeInteger(pageStart) || pageStart < 0) {
     throw new Error("Builder page start must be zero or a positive index.");
   }
-  if (!Number.isSafeInteger(pageLimit) || pageLimit <= 0) {
-    throw new Error("Builder page size must be a positive number.");
+  if (!Number.isSafeInteger(pageLimit) || pageLimit <= 0 || pageLimit >= 50) {
+    throw new Error("Builder page size must be between 1 and 49.");
   }
 
   const contract = new StellarSdk.Contract(contractId);
@@ -310,14 +310,15 @@ export async function listKitewellBuilders(
   const retval = await simulate(
     "list_builders",
     StellarSdk.nativeToScVal(pageStart, { type: "u32" }),
-    StellarSdk.nativeToScVal(pageLimit, { type: "u32" })
+    StellarSdk.nativeToScVal(pageLimit + 1, { type: "u32" })
   );
   const addresses = retval ? StellarSdk.scValToNative(retval) : [];
+  const page = pageBuilderAddresses(addresses || [], pageStart, pageLimit);
 
   // The index only stores addresses; the nickname still comes from
   // get_builder so the list and the single-builder lookup never disagree.
   const rows = await Promise.all(
-    (addresses || []).map(async (address) => {
+    page.rows.map(async (address) => {
       const name = await simulate(
         "get_builder",
         StellarSdk.nativeToScVal(address, { type: "address" })
@@ -330,7 +331,7 @@ export async function listKitewellBuilders(
     start: pageStart,
     limit: pageLimit,
     rows,
-    nextStart: rows.length === pageLimit ? pageStart + pageLimit : null,
+    nextStart: page.nextStart,
   };
 }
 
