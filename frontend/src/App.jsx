@@ -29,6 +29,7 @@ import {
   signChallengeWithFreighter,
   simulateRegisterBuilder,
   listKitewellBuilders,
+  readKitewellBuilder,
   createSponsoredAccountDraft,
   sponsorAccountCreationWithFreighter,
 } from "./freighter";
@@ -300,6 +301,9 @@ export default function App() {
   const [simulatedRegisterKey, setSimulatedRegisterKey] = useState(null);
   const [labState, setLabState] = useState(null);
   const [labStateError, setLabStateError] = useState(null);
+  const [builderAddress, setBuilderAddress] = useState("");
+  const [builderLookupResult, setBuilderLookupResult] = useState(null);
+  const [builderLookupError, setBuilderLookupError] = useState(null);
   const [adminState, setAdminState] = useState(null);
   const [proposeAdminForm, setProposeAdminForm] = useState({ address: "" });
   const [registerForm, setRegisterForm] = useState({ name: "" });
@@ -2100,6 +2104,29 @@ export default function App() {
       setLoading("");
     }
   }, [labInfo, publicKey, rpcHealth]);
+
+  const handleBuilderLookup = async (e) => {
+    e.preventDefault();
+    const contractId = labInfo?.network?.contract?.kitewell;
+    setBuilderLookupResult(null);
+    setBuilderLookupError(null);
+    if (!contractId) {
+      setBuilderLookupError(
+        "No contract id configured — deploy first (contracts/README.md)."
+      );
+      return;
+    }
+    setLoading("builder-lookup");
+    try {
+      setBuilderLookupResult(
+        await readKitewellBuilder(contractId, builderAddress)
+      );
+    } catch (err) {
+      setBuilderLookupError(err.message || "Builder lookup failed.");
+    } finally {
+      setLoading("");
+    }
+  };
 
   const handleRegister = async (e) => {
     e.preventDefault();
@@ -5355,6 +5382,50 @@ export default function App() {
                         </div>
                       )}
                     </>
+                  )}
+
+                  <form className="form" onSubmit={handleBuilderLookup}>
+                    <div className="subhead">Builder lookup</div>
+                    <label className="label" htmlFor="builder-lookup-address">
+                      Stellar address
+                    </label>
+                    <input
+                      id="builder-lookup-address"
+                      className="input"
+                      type="text"
+                      maxLength={56}
+                      placeholder="G…"
+                      value={builderAddress}
+                      onChange={(e) => setBuilderAddress(e.target.value)}
+                    />
+                    <button
+                      className="btn btn--secondary"
+                      type="submit"
+                      disabled={loading === "builder-lookup"}
+                    >
+                      {loading === "builder-lookup" ? (
+                        <>
+                          <Spinner /> Looking up…
+                        </>
+                      ) : (
+                        "Look up builder"
+                      )}
+                    </button>
+                  </form>
+                  {builderLookupError && (
+                    <div className="info-box info-box--warning">
+                      <p className="muted">{builderLookupError}</p>
+                    </div>
+                  )}
+                  {builderLookupResult && (
+                    <div className="info-box">
+                      <span className="eyebrow">Builder</span>
+                      {builderLookupResult.registered ? (
+                        <code>{builderLookupResult.name}</code>
+                      ) : (
+                        <span className="muted">Not registered</span>
+                      )}
+                    </div>
                   )}
 
                   <form className="form" onSubmit={handleRegister}>
