@@ -8,11 +8,13 @@ import {
   signAuthEntry,
 } from "@stellar/freighter-api";
 import * as StellarSdk from "@stellar/stellar-sdk";
-import { HORIZON_URL } from "./stellar";
-import { API_BASE } from "./config";
-
 import { Buffer } from "buffer";
 import { findNetworkByPassphrase, getActiveNetwork } from "./network";
+import {
+  decodeBuilderName,
+  describeBuilderLookup,
+  normalizeBuilderAddress,
+} from "./builderLookup";
 import {
   buildAsset,
   parsePathAssets,
@@ -335,6 +337,44 @@ export async function listKitewellBuilders(
     rows,
     nextStart: rows.length === pageLimit ? pageStart + pageLimit : null,
   };
+}
+
+/**
+ * Look up one registered builder by address via Soroban RPC.
+ *
+ * The lookup is a read-only simulation, so the connected wallet does not have
+ * to be the builder: any valid G… address can be queried.
+ *
+ * @param {string} contractId Kitewell contract (C…)
+ * @param {string} address Stellar account address (G…)
+ * @returns {Promise<{ address: string, name: string|null, registered: boolean, label: string }>}
+ */
+export async function readKitewellBuilder(contractId, address) {
+  const normalized = normalizeBuilderAddress(address);
+  if (!StellarSdk.StrKey.isValidContract(contractId)) {
+    throw new Error(
+      "Contract ID must be a valid Soroban contract strkey (C…)."
+    );
+  }
+
+  const contract = new StellarSdk.Contract(contractId);
+  const source = new StellarSdk.Account(ZERO_ADDRESS, "0");
+  const transaction = buildContractTx(
+    contract,
+    "get_builder",
+    [StellarSdk.nativeToScVal(normalized, { type: "address" })],
+    source,
+    30
+  );
+  const simulation = await sorobanRpc.simulateTransaction(transaction);
+  if (simulation.error) {
+    throw new Error(`get_builder() simulation failed: ${simulation.error}`);
+  }
+
+  return describeBuilderLookup(
+    normalized,
+    decodeBuilderName(simulation.result?.retval ?? null)
+  );
 }
 
 /**
@@ -1267,6 +1307,7 @@ export async function changeOfferPriceWithFreighter(publicKey, offer, newPrice) 
     price,
     offerId: String(offer.id),
   });
+
   const sourceAccount = await getServer().loadAccount(publicKey);
   const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: StellarSdk.BASE_FEE,
@@ -1741,24 +1782,6 @@ export async function preparePaymentWithFreighter(
   }
 
   return { hash: result.hash, deadline: extendTo };
-}
-
-export async function getBuilder(address) {
-  if (!StellarSdk.StrKey.isValidEd25519PublicKey(address)) {
-    throw new Error("Address must be a valid Stellar public key (G…).");
-  }
-  try {
-    const res = await fetch(`${API_BASE}/api/builder/${address}`);
-    if (!res.ok) throw new Error("Builder fetch failed");
-    const data = await res.json();
-    return data.builder || null;
-  } catch {
-    // Fall back to Horizon lookup - check if address has a home_domain (registered builder)
-    const account = await server.loadAccount(address);
-    return account.home_domain
-      ? { name: account.home_domain, address }
-      : null;
-  }
 }
 
 /**

@@ -9,8 +9,6 @@ import {
   pathPaymentWithFreighter,
   changeOfferPriceWithFreighter,
   changeTrustWithFreighter,
-
-  getBuilder,
   createClaimableBalanceWithFreighter,
   claimClaimableBalanceWithFreighter,
   readKitewellState,
@@ -29,6 +27,7 @@ import {
   signChallengeWithFreighter,
   simulateRegisterBuilder,
   listKitewellBuilders,
+  readKitewellBuilder,
   createSponsoredAccountDraft,
   sponsorAccountCreationWithFreighter,
 } from "./freighter";
@@ -274,14 +273,13 @@ export default function App() {
   const [signingConfirmationOpen, setSigningConfirmationOpen] = useState(false);
   const [labInfo, setLabInfo] = useState(null);
   const [labError, setLabError] = useState(null);
-  const [builderAddress, setBuilderAddress] = useState("");
-  const [builderName, setBuilderName] = useState("");
-  const [loadingBuilder, setLoadingBuilder] = useState(false);
-
   const [simulationFees, setSimulationFees] = useState(null);
   const [simulatedRegisterKey, setSimulatedRegisterKey] = useState(null);
   const [labState, setLabState] = useState(null);
   const [labStateError, setLabStateError] = useState(null);
+  const [builderAddress, setBuilderAddress] = useState("");
+  const [builderLookupResult, setBuilderLookupResult] = useState(null);
+  const [builderLookupError, setBuilderLookupError] = useState(null);
   const [adminState, setAdminState] = useState(null);
   const [proposeAdminForm, setProposeAdminForm] = useState({ address: "" });
   const [registerForm, setRegisterForm] = useState({ name: "" });
@@ -360,7 +358,6 @@ export default function App() {
   const [labEventsError, setLabEventsError] = useState(null);
   const eventCursorRef = useRef(null);
   const eventStartLedgerRef = useRef(null);
-
 
   // Replay read: one shot from a chosen ledger, separate from the live tail.
   const [replayForm, setReplayForm] = useState("");
@@ -503,15 +500,7 @@ export default function App() {
   useEffect(() => {
     checkFreighterInstalled().then(setFreighterInstalled);
   }, []);
-  useEffect(() => {
-    if (builderAddress) {
-      setLoadingBuilder(true);
-      getBuilder(builderAddress).then((builder) => {
-        setBuilderName(builder ? builder.name || "Registered" : "Not registered");
-        setLoadingBuilder(false);
-      });
-    }
-  }, [builderAddress]);
+
   useEffect(() => () => cancelHorizonReads(), []);
 
   useEffect(() => {
@@ -578,7 +567,6 @@ export default function App() {
       setSignerWeights(newWeights);
     }
   }, [signers.length, signerWeights.length]);
-
 
   const refreshBalances = useCallback(async () => {
     if (!publicKey) return;
@@ -1132,15 +1120,7 @@ export default function App() {
     if (!newLimit || newLimit.trim() === "") {
       return showToast("Enter a new limit.", "error");
     }
-  const lookupBuilder = async () => {
-    if (!builderAddress) return showToast("Enter an address first.", "error");
-    setLoadingBuilder(true);
-    const builder = await getBuilder(builderAddress);
-    setBuilderName(builder ? builder.name || "Registered" : "Not registered");
-    setLoadingBuilder(false);
-  };
 
-  const requireWallet = !publicKey;
     const limitNum = parseFloat(newLimit);
     if (Number.isNaN(limitNum) || limitNum < 0) {
       return showToast("Limit must be a non-negative number.", "error");
@@ -2095,6 +2075,29 @@ export default function App() {
       setLoading("");
     }
   }, [labInfo, publicKey, rpcHealth]);
+
+  const handleBuilderLookup = async (e) => {
+    e.preventDefault();
+    const contractId = labInfo?.network?.contract?.kitewell;
+    setBuilderLookupResult(null);
+    setBuilderLookupError(null);
+    if (!contractId) {
+      setBuilderLookupError(
+        "No contract id configured — deploy first (contracts/README.md)."
+      );
+      return;
+    }
+    setLoading("builder-lookup");
+    try {
+      setBuilderLookupResult(
+        await readKitewellBuilder(contractId, builderAddress)
+      );
+    } catch (err) {
+      setBuilderLookupError(err.message || "Builder lookup failed.");
+    } finally {
+      setLoading("");
+    }
+  };
 
   const handleRegister = async (e) => {
     e.preventDefault();
@@ -5382,6 +5385,50 @@ export default function App() {
                     </>
                   )}
 
+                  <form className="form" onSubmit={handleBuilderLookup}>
+                    <div className="subhead">Builder lookup</div>
+                    <label className="label" htmlFor="builder-lookup-address">
+                      Stellar address
+                    </label>
+                    <input
+                      id="builder-lookup-address"
+                      className="input"
+                      type="text"
+                      maxLength={56}
+                      placeholder="G…"
+                      value={builderAddress}
+                      onChange={(e) => setBuilderAddress(e.target.value)}
+                    />
+                    <button
+                      className="btn btn--secondary"
+                      type="submit"
+                      disabled={loading === "builder-lookup"}
+                    >
+                      {loading === "builder-lookup" ? (
+                        <>
+                          <Spinner /> Looking up…
+                        </>
+                      ) : (
+                        "Look up builder"
+                      )}
+                    </button>
+                  </form>
+                  {builderLookupError && (
+                    <div className="info-box info-box--warning">
+                      <p className="muted">{builderLookupError}</p>
+                    </div>
+                  )}
+                  {builderLookupResult && (
+                    <div className="info-box">
+                      <span className="eyebrow">Builder</span>
+                      {builderLookupResult.registered ? (
+                        <code>{builderLookupResult.name}</code>
+                      ) : (
+                        <span className="muted">Not registered</span>
+                      )}
+                    </div>
+                  )}
+
                   <form className="form" onSubmit={handleRegister}>
                     <label className="label" htmlFor="builder-name">
                       Builder name
@@ -6863,47 +6910,6 @@ export default function App() {
                       )}
                     </div>
                   ))}
-                </div>
-              )}
-              {publicKey && (
-                <div className="section">
-                  <h2>Builder Lookup</h2>
-                  <div className="form">
-                    <label className="label">Address</label>
-                    <input
-                      className="input"
-                      type="text"
-                      value={builderAddress}
-                      onChange={(e) => setBuilderAddress(e.target.value)}
-                      placeholder="G..."
-                      maxLength=56
-                      required
-                    />
-                    <button
-                      className="btn btn--primary"
-                      type="button"
-                      onClick={lookupBuilder}
-                      disabled={loadingBuilder}
-                    >
-                      {loadingBuilder ? (
-                        <>
-                          <Spinner size={14} /> Looking up…
-                        </>
-                      ) : (
-                        "Lookup"
-                      )}
-                    </button>
-                  </div>
-                  {builderName !== "" && (
-                    <div className="info-box">
-                      <span className="eyebrow">Builder</span>
-                      {builderName !== "Not registered" ? (
-                        <code>{builderName}</code>
-                      ) : (
-                        <span className="muted">Not registered</span>
-                      )}
-                    </div>
-                  )}
                 </div>
               )}
             </div>
