@@ -9,8 +9,7 @@ import {
   NETWORKS,
 } from "./network";
 import { calculateMinimumBalance } from "./accountReserve";
-import { mapTransactionFee, mapTransactionSources } from "./historyFee";
-import { Buffer } from "buffer";
+import { paymentMemoFields } from "./paymentMemo";
 
 /** Shown in the lab panel when Horizon asks the client to slow down. */
 export const HORIZON_SLOWDOWN_MESSAGE =
@@ -26,80 +25,55 @@ const HORIZON_429_MAX_WAIT_SEC = 30;
  */
 const horizon429BackoffByNetwork = new Map();
 
-
-/** @param {unknown} error */
-export function isHorizon429(error) {
-  const status = error?.response?.status ?? error?.status;
-  if (status === 429) return true;
-  const message = String(error?.message ?? "");
-  return /too many requests/i.test(message);
+function horizonStatus(error) {
+  return error?.response?.status ?? error?.status ?? null;
 }
 
-/** @param {unknown} error */
 export function isHorizonSlowdownError(error) {
-  return error instanceof Error && error.message === HORIZON_SLOWDOWN_MESSAGE;
+  return horizonStatus(error) === 429;
 }
 
-/** @param {unknown} error */
-function readRetryAfterSeconds(error) {
+function horizonRetryAfterSeconds(error, streak) {
   const headers = error?.response?.headers;
-  if (!headers) return null;
-
-  const raw =
-    typeof headers.get === "function"
-      ? headers.get("retry-after") ?? headers.get("Retry-After")
-      : headers["retry-after"] ?? headers["Retry-After"];
-
-  if (raw == null || raw === "") return null;
-
-  const asNumber = Number(raw);
-  if (Number.isFinite(asNumber) && asNumber >= 0) return asNumber;
-
-  const asDate = Date.parse(String(raw));
-  if (!Number.isNaN(asDate)) {
-    return Math.max(0, (asDate - Date.now()) / 1000);
+  const header = typeof headers?.get === "function"
+    ? headers.get("retry-after")
+    : headers?.["retry-after"];
+  const parsed = Number(header);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.min(parsed, HORIZON_429_MAX_WAIT_SEC);
   }
-
-  return null;
-}
-
-/** @param {number} streak 1-based count of consecutive 429s on this network */
-export function computeHorizon429WaitSeconds(streak) {
-  const safeStreak = Math.max(1, streak);
   return Math.min(
-    HORIZON_429_BASE_WAIT_SEC * 2 ** (safeStreak - 1),
+    HORIZON_429_BASE_WAIT_SEC * 2 ** Math.max(streak, 0),
     HORIZON_429_MAX_WAIT_SEC
   );
 }
 
-function resetHorizon429Backoff(networkId = getActiveNetworkId()) {
-  horizon429BackoffByNetwork.delete(networkId);
-}
-
-/**
- * Record a 429 for the active network and return how long to wait (seconds).
- * Prefers Horizon's Retry-After when present; otherwise 2 → 4 → 8 … capped at 30.
- * @param {unknown} error
- * @returns {number}
- */
-export function recordHorizon429(error) {
+async function withHorizon429Backoff(task) {
   const networkId = getActiveNetworkId();
-  const prior = horizon429BackoffByNetwork.get(networkId) || { streak: 0 };
-  const streak = prior.streak + 1;
-  horizon429BackoffByNetwork.set(networkId, { streak });
-
-  const retryAfter = readRetryAfterSeconds(error);
-  if (retryAfter != null) return retryAfter;
-  return computeHorizon429WaitSeconds(streak);
+  const state = horizon429BackoffByNetwork.get(networkId) || { streak: 0 };
+  let attempt = 0;
+  for (;;) {
+    try {
+      const result = await task();
+      horizon429BackoffByNetwork.set(networkId, { streak: 0 });
+      return result;
+    } catch (error) {
+      if (!isHorizonSlowdownError(error) || attempt >= 2) throw error;
+      const wait = horizonRetryAfterSeconds(error, state.streak);
+      state.streak += 1;
+      horizon429BackoffByNetwork.set(networkId, state);
+      await new Promise((resolve) => setTimeout(resolve, wait * 1000));
+      attempt += 1;
+    }
+  }
 }
 
-/** Test helper: clear the shared backoff clocks. */
 export function resetHorizon429BackoffForTests() {
   horizon429BackoffByNetwork.clear();
 }
 
 function abortError() {
-  const error = new Error("Aborted");
+  const error = new Error("The request was aborted.");
   error.name = "AbortError";
   return error;
 }
@@ -110,52 +84,16 @@ function defaultSleep(ms, signal) {
       reject(abortError());
       return;
     }
-
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-
-    function onAbort() {
-      clearTimeout(timer);
-      reject(abortError());
-    }
-
-    signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(abortError());
+      },
+      { once: true }
+    );
   });
-}
-
-/**
- * Run a Horizon lab read with shared per-network 429 backoff.
- *
- * On 429: waits Retry-After (or 2/4/8…≤30s), then rejects with
- * {@link HORIZON_SLOWDOWN_MESSAGE}. A later success resets the clock.
- * A 500 (or any non-429) is rethrown unchanged. The wait is cancelled when
- * `signal` aborts (unmount / network change).
- *
- * @template T
- * @param {() => Promise<T>} fn
- * @param {object} [options]
- * @param {AbortSignal} [options.signal]
- * @param {(ms: number, signal?: AbortSignal) => Promise<void>} [options.sleep]
- * @returns {Promise<T>}
- */
-export async function withHorizon429Backoff(fn, options = {}) {
-  const { signal, sleep = defaultSleep } = options;
-
-  if (signal?.aborted) throw abortError();
-
-  try {
-    const result = await fn();
-    resetHorizon429Backoff();
-    return result;
-  } catch (error) {
-    if (!isHorizon429(error)) throw error;
-
-    const waitSeconds = recordHorizon429(error);
-    await sleep(waitSeconds * 1000, signal);
-    throw new Error(HORIZON_SLOWDOWN_MESSAGE);
-  }
 }
 
 function getServer() {
@@ -1140,7 +1078,6 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
       .forAccount(publicKey)
       .limit(limit)
       .order("desc")
-      // Embeds each payment's transaction: its fee, operation count and sources.
       .join("transactions");
     if (cursor) request = request.cursor(cursor);
     const payments = await request.call();
@@ -1159,7 +1096,7 @@ export async function getTransactions(publicKey, limit = 15, cursor, options = {
           transaction_hash: p.transaction_hash,
           created_at: p.created_at,
           ...mapTransactionFee(p.transaction),
-          ...mapTransactionSources(p.transaction),
+          ...paymentMemoFields(p.transaction),
         })),
       nextCursor:
         payments.records.length < limit ? null : (lastRaw?.paging_token ?? null),
@@ -1416,64 +1353,46 @@ export async function watchOfferUntilGone(offerId, options = {}) {
   return { status: "still-open", stillListed: null };
 }
 
-export async function getPendingTransactions(publicKey, options = {}) {
+export function selectPendingTransactions(records = []) {
+  return records
+    .filter((row) => String(row.status || row.tx_status || "").toLowerCase() === "pending")
+    .map((row) => ({
+      hash: row.hash,
+      fee: row.fee ?? row.max_fee ?? null,
+      sequence: row.sequence ?? null,
+      status: "pending",
+    }));
+}
+
+export async function getPendingTransactions(publicKey) {
   return withHorizon429Backoff(async () => {
     const url = `${getActiveNetwork().horizonUrl}/accounts/${encodeURIComponent(
       publicKey
     )}/pending_transactions`;
-
-    const response = options.signal
-      ? await fetch(url, { signal: options.signal })
-      : await fetch(url);
-    if (response.status === 404) {
-      return [];
-    }
+    const response = await fetch(url);
+    if (response.status === 404) return [];
     if (!response.ok) {
-      throw new Error(
-        `Could not load pending transactions (HTTP ${response.status}).`
-      );
+      const error = new Error("Could not load pending transactions.");
+      error.status = response.status;
+      throw error;
     }
-
     const body = await response.json();
-    const records = Array.isArray(body)
-      ? body
-      : body?._embedded?.records || body?.records || [];
-
-    return selectPendingTransactions(records);
-  }, options);
+    return selectPendingTransactions(body?._embedded?.records || []);
+  });
 }
 
-/**
- * Load one page of trades for an account.
- *
- * @param {string} publicKey Account to page through.
- * @param {number} [limit] Page size; Horizon caps it at 200 server-side.
- * @param {string} [cursor] Paging cursor from the previous page; omit for the
- *   first page.
- * @returns {Promise<{ records: object[], nextCursor: string|null }>} The
- *   mapped trade records plus the cursor for the next page (null on the last
- *   page).
- */
-export async function getTrades(publicKey, limit = 15, cursor, options = {}) {
-  if (!publicKey || typeof publicKey !== "string") {
-    throw new Error("Public key is required.");
+export async function getAccountTrades(publicKey, { limit = 10, cursor } = {}) {
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new Error("Connect a valid Freighter address first.");
   }
 
-  let builder = getServer()
-    .trades()
-    .forAccount(publicKey)
-    .limit(limit)
-    .order("desc");
-
-  if (cursor) {
-    builder = builder.cursor(cursor);
-  }
-
+  let builder = getServer().trades().forAccount(publicKey).limit(limit).order("desc");
+  if (cursor) builder = builder.cursor(cursor);
   const response = await builder.call();
-  const hashes = await lookupTradeTransactionHashes(response.records, options);
+  const records = response.records || [];
 
   return {
-    records: response.records.map((trade, index) => ({
+    records: records.map((trade) => ({
       id: trade.id,
       ledger: tradeLedger(trade),
       transaction_hash: hashes[index],
@@ -1492,8 +1411,8 @@ export async function getTrades(publicKey, limit = 15, cursor, options = {}) {
       price: trade.price,
       base_is_seller: trade.base_is_seller,
     })),
-    nextCursor: response.records.length > 0 
-      ? response.records[response.records.length - 1].paging_token 
+    nextCursor: records.length > 0
+      ? records[records.length - 1].paging_token
       : null,
   };
 }

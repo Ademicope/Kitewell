@@ -303,8 +303,9 @@ test("GET /api/payments/:address filters out non-payment records", async (t) => 
           transaction: {
             fee_charged: "100",
             operation_count: 1,
-            source_account: "GFROM",
-            fee_account: "GFROM",
+            memo_type: "text",
+            memo: "invoice-42",
+            memo_bytes: "aW52b2ljZS00Mg==",
           },
         },
         {
@@ -351,8 +352,9 @@ test("GET /api/payments/:address filters out non-payment records", async (t) => 
       fee_charged: "100",
       operation_count: 1,
       fee_bumped: false,
-      source_account: "GFROM",
-      fee_account: null,
+      memo_type: "text",
+      memo: "invoice-42",
+      memo_bytes: "aW52b2ljZS00Mg==",
       explorerUrl: "https://explorer.test.invalid/tx/hash-payment",
     },
     {
